@@ -1,0 +1,10 @@
+.dart_tool/
+.flutter-plugins*
+.packages
+build/
+*.aar
+*.jks
+*.keystore
+local.properties
+.idea/
+.DS_Store

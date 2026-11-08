@@ -1,0 +1,32 @@
+name: vpn
+description: V2-TUN, a client for the io.surprise.vpn tunnel library.
+publish_to: none
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.9.0
+
+# Run `flutter pub upgrade --major-versions` after setup so everything is pinned to the newest releases.
+dependencies:
+  flutter:
+    sdk: flutter
+  shared_preferences: ^2.5.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  fonts:
+    # Bundled fonts: Android's system font settings cannot replace them.
+    - family: DMSans
+      fonts:
+        - asset: assets/fonts/DMSans.ttf
+    - family: Newsreader
+      fonts:
+        - asset: assets/fonts/Newsreader.ttf
+    - family: JetBrainsMono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono.ttf

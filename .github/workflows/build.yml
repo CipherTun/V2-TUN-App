@@ -1,0 +1,184 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "release (signed) or debug (faster)"
+        type: choice
+        options: [release, debug]
+        default: release
+  push:
+    branches: [main, "integrate/**"]
+    paths-ignore: ["**.md", "assets/icon/preview.png"]
+    tags: ["v*"]
+
+permissions:
+  contents: write   # needed to attach APKs to a release on tags
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      # Phone-friendly: upload xray_vpn.zip to the repo root and this step unpacks it.
+      # If the project files are already in the repo, the step does nothing.
+      - name: Unpack project zip
+        run: |
+          if [ -f xray_vpn.zip ]; then
+            rm -rf _src && mkdir _src && unzip -q xray_vpn.zip -d _src
+            P="$(find _src -maxdepth 3 -name pubspec.yaml | head -1)"
+            [ -n "$P" ] && cp -R "$(dirname "$P")"/. .
+            rm -rf _src
+          fi
+          test -f pubspec.yaml || { echo "::error::pubspec.yaml not found. Upload xray_vpn.zip to the repository root."; exit 1; }
+          ls
+
+      - name: Load pinned versions
+        run: grep -E '^[A-Z0-9_]+=' scripts/versions.env >> "$GITHUB_ENV"
+
+      # ── Tunnel library: V2-TUN -> v2tun.aar (gomobile) ──
+      # Checked out first so setup-go can key its dependency cache on the library's go.sum.
+      # If the library repository is private, add a repo secret V2TUN_TOKEN
+      # (a token with read access to it).
+      - name: Check out V2-TUN
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.V2TUN_REPO }}
+          ref: ${{ env.V2TUN_REF }}
+          path: v2-tun
+          token: ${{ secrets.V2TUN_TOKEN || github.token }}
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Caches only downloaded Go modules and Go's build cache. The build cache is
+      # content-addressed, so any change to the library source is always recompiled.
+      # The built v2tun.aar itself is NEVER cached.
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          check-latest: true
+          cache: true
+          cache-dependency-path: v2-tun/go.sum
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # Gradle downloads/wrapper only (no project outputs, no aar).
+      - name: Cache Gradle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('pubspec.yaml', 'scripts/versions.env') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Build v2tun.aar (always fresh)
+        run: |
+          rm -rf android-libs
+          echo "V2-TUN commit: $(git -C v2-tun rev-parse HEAD)"
+          V2TUN_DIR="$PWD/v2-tun" bash ./scripts/build_core.sh
+          test -s android-libs/v2tun.aar || { echo "::error::v2tun.aar was not produced"; exit 1; }
+
+      # ── Project scaffolding, icons ──
+      - name: Prepare Flutter project
+        run: bash ./scripts/ci_prepare.sh
+
+      # ── Signing ──
+      # Preferred: add repo secrets ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD,
+      # ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD. Otherwise a key is generated once and cached,
+      # so updates keep installing over each other (as long as the cache is alive).
+      - name: Restore cached signing key
+        if: inputs.build_type != 'debug'
+        id: keycache
+        uses: actions/cache@v5
+        with:
+          path: ~/.xray-signing
+          key: xray-signing-key-v1
+
+      - name: Configure signing
+        if: inputs.build_type != 'debug'
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.xray-signing
+          if [ -n "${KS_B64:-}" ]; then
+            echo "$KS_B64" | base64 --decode > ~/.xray-signing/release.jks
+            STORE_PASS="$KS_PASS"; ALIAS="${KEY_ALIAS:-xray}"; KPASS="${KEY_PASS:-$KS_PASS}"
+            echo "Using the keystore from repository secrets"
+          elif [ -f ~/.xray-signing/release.jks ] && [ -f ~/.xray-signing/pass.txt ]; then
+            STORE_PASS="$(cat ~/.xray-signing/pass.txt)"; ALIAS=xray; KPASS="$STORE_PASS"
+            echo "Using the cached signing key"
+          else
+            STORE_PASS="$(openssl rand -hex 16)"; ALIAS=xray; KPASS="$STORE_PASS"
+            keytool -genkeypair -v -keystore ~/.xray-signing/release.jks -storetype PKCS12 \
+              -alias "$ALIAS" -keyalg RSA -keysize 4096 -validity 36500 \
+              -storepass "$STORE_PASS" -keypass "$KPASS" \
+              -dname "CN=XRay VPN, O=io.surprise, C=US"
+            echo "$STORE_PASS" > ~/.xray-signing/pass.txt
+            echo "Generated a new signing key (cached for later builds)"
+          fi
+          cat > android/key.properties <<EOP
+          storeFile=$HOME/.xray-signing/release.jks
+          storePassword=$STORE_PASS
+          keyAlias=$ALIAS
+          keyPassword=$KPASS
+          EOP
+          sed -i 's/^ *//' android/key.properties
+
+      # ── Build ──
+      - name: Build release APKs
+        if: inputs.build_type != 'debug'
+        run: |
+          flutter build apk --release --split-per-abi --build-number ${{ github.run_number }}
+          flutter build apk --release --build-number ${{ github.run_number }}
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-release.apk dist/XRayVPN-universal.apk
+          for a in arm64-v8a armeabi-v7a x86_64; do
+            f=build/app/outputs/flutter-apk/app-$a-release.apk
+            [ -f "$f" ] && cp "$f" "dist/XRayVPN-$a.apk"
+          done
+          ls -la dist
+
+      - name: Build debug APK
+        if: inputs.build_type == 'debug'
+        run: |
+          flutter build apk --debug --build-number ${{ github.run_number }}
+          mkdir -p dist && cp build/app/outputs/flutter-apk/app-debug.apk dist/XRayVPN-debug.apk
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v6
+        with:
+          name: XRayVPN-apks
+          path: dist/*.apk
+          retention-days: 30
+
+      - name: Attach to GitHub release (tags)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.apk
+          generate_release_notes: true
+
+      # Runs after the APKs are already uploaded, so it never delays them.
+      # Never blocks the build, read the log if the app misbehaves.
+      - name: Analyze
+        if: inputs.build_type != 'debug'
+        continue-on-error: true
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings

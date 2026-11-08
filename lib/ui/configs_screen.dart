@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import '../core/bridge.dart';
 import '../core/models.dart';
 import '../core/store.dart';
+import 'config_editor.dart';
 import 'theme.dart';
 
 class ConfigsScreen extends StatefulWidget {
@@ -108,13 +109,16 @@ class _ConfigsScreenState extends State<ConfigsScreen> {
                 case 'sub':
                   await _addSub(context, st);
                 case 'manual':
+                  await _editForm(context, st, null);
+                case 'json':
                   await _edit(context, st, null);
               }
             },
             itemBuilder: (_) => const [
               PopupMenuItem(value: 'clip', child: Text('Import from clipboard')),
               PopupMenuItem(value: 'sub', child: Text('Add subscription URL')),
-              PopupMenuItem(value: 'manual', child: Text('Write JSON')),
+              PopupMenuItem(value: 'manual', child: Text('New config')),
+              PopupMenuItem(value: 'json', child: Text('Write JSON')),
             ],
           ),
           PopupMenuButton<String>(
@@ -220,13 +224,13 @@ class _ConfigsScreenState extends State<ConfigsScreen> {
                         contentPadding: const EdgeInsets.fromLTRB(18, 6, 8, 6),
                         onTap: () => st.select(p),
                         title: Text(p.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-                        subtitle: Text('${p.protocol.toUpperCase()} · ${p.server}', maxLines: 1, overflow: TextOverflow.ellipsis),
+                        subtitle: Text('${p.protocol.toUpperCase()} \u00b7 ${p.server}', maxLines: 1, overflow: TextOverflow.ellipsis),
                         trailing: Row(mainAxisSize: MainAxisSize.min, children: [
                           if (p.pingMs != null)
                             Text(p.pingMs! < 0 ? 'timeout' : '${p.pingMs} ms',
                                 style: mono(12, color: p.pingMs! < 0 ? googleRed : (p.pingMs! < 300 ? googleGreen : googleYellow))),
                           IconButton(icon: const Icon(Icons.copy_all_outlined), tooltip: 'Duplicate', onPressed: () => st.duplicateProfile(p)),
-                          IconButton(icon: const Icon(Icons.edit_outlined), onPressed: () => _edit(context, st, p)),
+                          IconButton(icon: const Icon(Icons.edit_outlined), tooltip: 'Edit', onPressed: () => _editForm(context, st, p)),
                         ]),
                       ),
                     ),
@@ -235,6 +239,24 @@ class _ConfigsScreenState extends State<ConfigsScreen> {
               ),
       ),
     ]);
+  }
+
+  /// Opens the row-based editor. A config whose JSON is not an object (or does
+  /// not parse) falls back to the raw JSON editor so it can still be repaired.
+  Future<void> _editForm(BuildContext context, AppStore st, Profile? p) async {
+    if (p != null) {
+      var ok = false;
+      try {
+        ok = jsonDecode(p.json) is Map;
+      } catch (_) {}
+      if (!ok) {
+        _toast('This config is not a JSON object, opening the raw editor');
+        return _edit(context, st, p);
+      }
+    }
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(builder: (_) => ConfigEditorScreen(profile: p)),
+    );
   }
 
   Future<void> _edit(BuildContext context, AppStore st, Profile? p) async {

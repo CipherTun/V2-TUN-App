@@ -358,9 +358,16 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
     _setIn(obj, key, v.split(RegExp(r'[,\s]+')).where((e) => e.isNotEmpty).toList());
   }
 
+  /// Picker for a key inside a nested object such as tls or reality.
   Future<void> _pickIn(String obj, String key, String title, List<_Opt> opts, {bool prune = true}) async {
     final v = await _askChoice(title, opts, _gs(obj, key).toLowerCase());
     if (v != null) _setIn(obj, key, v, prune: prune);
+  }
+
+  /// Picker for a top-level key such as method.
+  Future<void> _pickTop(String key, String title, List<_Opt> opts) async {
+    final v = await _askChoice(title, opts, _str(key).toLowerCase());
+    if (v != null) _set(key, v);
   }
 
   Future<void> _editName() async {
@@ -667,7 +674,7 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
               monospace: true),
           _row('Alter ID', _m['alterId'] == null ? '0' : '${_intOf('alterId')}', _editAlterId),
           _row('Encryption', _label(_vmessMethods, _str('method').toLowerCase()),
-              () => _pickIn('', 'method', 'Encryption', _vmessMethods)),
+              () => _pickTop('method', 'Encryption', _vmessMethods)),
         ];
       case 'trojan':
         return [
@@ -677,7 +684,7 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
       case 'shadowsocks':
         return [
           _row('Method', _label(_ssMethods, _str('method').toLowerCase()),
-              () => _pickIn('', 'method', 'Method', _ssMethods)),
+              () => _pickTop('method', 'Method', _ssMethods)),
           _row('Password', _mask(_str('password')),
               () => _editTop('password', 'Password', trim: false), monospace: true),
         ];
@@ -781,10 +788,7 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
       ],
       if (net == 'xhttp')
         _row('XHTTP mode', _label(_xhttpModes, _str('xhttpMode')),
-            () async {
-              final v = await _askChoice('XHTTP mode', _xhttpModes, _str('xhttpMode'));
-              if (v != null) _set('xhttpMode', v);
-            }),
+            () => _pickTop('xhttpMode', 'XHTTP mode', _xhttpModes)),
       if (net == 'grpc') ...[
         _row('Host', _gs('ws', 'host'),
             () => _editIn('ws', 'host', 'Host', hint: 'Authority sent with the request.'),

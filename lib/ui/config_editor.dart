@@ -8,6 +8,8 @@ import '../core/models.dart';
 import '../core/store.dart';
 import 'theme.dart';
 
+part 'config_editor_more.dart';
+
 /// One choice in a picker dialog.
 class _Opt {
   const _Opt(this.value, this.label);
@@ -33,6 +35,7 @@ const _protocols = <_Opt>[
 
 const _networks = <_Opt>[
   _Opt('tcp', 'TCP'),
+  _Opt('kcp', 'mKCP'),
   _Opt('ws', 'WebSocket'),
   _Opt('httpupgrade', 'HTTP Upgrade'),
   _Opt('h2', 'HTTP/2'),
@@ -108,6 +111,7 @@ String _canonNetwork(String n) => switch (n.toLowerCase()) {
       'websocket' => 'ws',
       'http' => 'h2',
       'splithttp' => 'xhttp',
+      'mkcp' => 'kcp',
       final v => v,
     };
 
@@ -120,9 +124,141 @@ String _label(List<_Opt> opts, String v) {
 
 String _mask(String v) => v.isEmpty ? '' : '\u2022' * (v.length > 12 ? 12 : v.length);
 
+// ---- dialogs and row tiles shared by the editor and its sub pages --------------
+ShapeBorder get _dlgShape => RoundedRectangleBorder(borderRadius: BorderRadius.circular(24));
+
+/// Returns null on Cancel, the text (possibly empty) on OK.
+Future<String?> _textDialog(
+  BuildContext context, {
+  required String title,
+  required String initial,
+  String? hint,
+  TextInputType keyboard = TextInputType.text,
+  int maxLines = 1,
+  bool trim = true,
+  bool monospace = false,
+}) {
+  final c = TextEditingController(text: initial);
+  String done() => trim ? c.text.trim() : c.text;
+  return showDialog<String>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: surfaceHigh,
+      shape: _dlgShape,
+      title: Text(title, style: serif(22)),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (hint != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Text(hint, style: Theme.of(ctx).textTheme.bodySmall),
+            ),
+          TextField(
+            controller: c,
+            autofocus: true,
+            keyboardType: keyboard,
+            minLines: 1,
+            maxLines: maxLines,
+            autocorrect: false,
+            enableSuggestions: false,
+            style: monospace ? mono(13) : null,
+            onSubmitted: maxLines == 1 ? (_) => Navigator.pop(ctx, done()) : null,
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+        TextButton(onPressed: () => Navigator.pop(ctx, done()), child: const Text('OK')),
+      ],
+    ),
+  );
+}
+
+/// Radio list: a tap picks and closes. Returns null on Cancel.
+Future<String?> _choiceDialog(BuildContext context, String title, List<_Opt> opts, String current) {
+  return showDialog<String>(
+    context: context,
+    builder: (ctx) {
+      final accent = Theme.of(ctx).colorScheme.primary;
+      return AlertDialog(
+        backgroundColor: surfaceHigh,
+        shape: _dlgShape,
+        title: Text(title, style: serif(22)),
+        contentPadding: const EdgeInsets.fromLTRB(0, 8, 0, 0),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              for (final o in opts)
+                ListTile(
+                  leading: Icon(
+                    o.value == current ? Icons.radio_button_checked : Icons.radio_button_unchecked,
+                    color: o.value == current ? accent : textMuted,
+                  ),
+                  title: Text(o.label),
+                  onTap: () => Navigator.pop(ctx, o.value),
+                ),
+            ],
+          ),
+        ),
+        actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel'))],
+      );
+    },
+  );
+}
+
+Future<bool> _confirmDialog(BuildContext context, String title, String body,
+    {required String yes, required String no}) async {
+  final r = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: surfaceHigh,
+      shape: _dlgShape,
+      title: Text(title, style: serif(22)),
+      content: Text(body),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(no)),
+        TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(yes)),
+      ],
+    ),
+  );
+  return r == true;
+}
+
+Widget _headerTile(BuildContext context, String t) => Padding(
+      padding: const EdgeInsets.fromLTRB(20, 18, 20, 4),
+      child: Text(t, style: sans(12.5, w: FontWeight.w600, color: Theme.of(context).colorScheme.primary, spacing: 0.4)),
+    );
+
+Widget _rowTile(BuildContext context, String label, String value, VoidCallback onTap, {bool monospace = false}) {
+  final shown = value.isEmpty ? 'Not set' : value;
+  return InkWell(
+    onTap: onTap,
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: Theme.of(context).textTheme.bodyLarge),
+          const SizedBox(height: 2),
+          Text(
+            shown,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: (monospace && value.isNotEmpty) ? mono(12.5, color: textMuted) : Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
 /// Settings-style editor for one config: rows with the current value, a tap
 /// opens a picker or a text dialog. It edits a working copy of the config JSON
-/// and keeps every key it does not show (routing, backups, payload, mux ...).
+/// and keeps every key it does not show (routing, backups, mux ...).
 class ConfigEditorScreen extends StatefulWidget {
   const ConfigEditorScreen({super.key, this.profile});
 
@@ -186,7 +322,8 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
     return fresh;
   }
 
-  bool _empty(Object? v) => v == null || (v is String && v.isEmpty) || (v is List && v.isEmpty);
+  bool _empty(Object? v) =>
+      v == null || (v is String && v.isEmpty) || (v is List && v.isEmpty) || (v is Map && v.isEmpty);
 
   void _set(String k, Object? v) => setState(() {
         if (_empty(v)) {
@@ -217,10 +354,7 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
 
   void _toast(String m) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
 
-  // ---- dialogs ----------------------------------------------------------------
-  ShapeBorder get _dialogShape => RoundedRectangleBorder(borderRadius: BorderRadius.circular(24));
-
-  /// Returns null on Cancel, the text (possibly empty) on OK.
+  // ---- dialogs (thin wrappers over the shared ones) ---------------------------
   Future<String?> _askText({
     required String title,
     required String initial,
@@ -229,95 +363,21 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
     int maxLines = 1,
     bool trim = true,
     bool monospace = false,
-  }) {
-    final c = TextEditingController(text: initial);
-    String done() => trim ? c.text.trim() : c.text;
-    return showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: surfaceHigh,
-        shape: _dialogShape,
-        title: Text(title, style: serif(22)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (hint != null)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 12),
-                child: Text(hint, style: Theme.of(ctx).textTheme.bodySmall),
-              ),
-            TextField(
-              controller: c,
-              autofocus: true,
-              keyboardType: keyboard,
-              minLines: 1,
-              maxLines: maxLines,
-              autocorrect: false,
-              enableSuggestions: false,
-              style: monospace ? mono(13) : null,
-              onSubmitted: maxLines == 1 ? (_) => Navigator.pop(ctx, done()) : null,
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          TextButton(onPressed: () => Navigator.pop(ctx, done()), child: const Text('OK')),
-        ],
-      ),
-    );
-  }
+  }) =>
+      _textDialog(context,
+          title: title,
+          initial: initial,
+          hint: hint,
+          keyboard: keyboard,
+          maxLines: maxLines,
+          trim: trim,
+          monospace: monospace);
 
-  /// Radio list: a tap picks and closes. Returns null on Cancel.
-  Future<String?> _askChoice(String title, List<_Opt> opts, String current) {
-    return showDialog<String>(
-      context: context,
-      builder: (ctx) {
-        final accent = Theme.of(ctx).colorScheme.primary;
-        return AlertDialog(
-          backgroundColor: surfaceHigh,
-          shape: _dialogShape,
-          title: Text(title, style: serif(22)),
-          contentPadding: const EdgeInsets.fromLTRB(0, 8, 0, 0),
-          content: SizedBox(
-            width: double.maxFinite,
-            child: ListView(
-              shrinkWrap: true,
-              children: [
-                for (final o in opts)
-                  ListTile(
-                    leading: Icon(
-                      o.value == current ? Icons.radio_button_checked : Icons.radio_button_unchecked,
-                      color: o.value == current ? accent : textMuted,
-                    ),
-                    title: Text(o.label),
-                    onTap: () => Navigator.pop(ctx, o.value),
-                  ),
-              ],
-            ),
-          ),
-          actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel'))],
-        );
-      },
-    );
-  }
+  Future<String?> _askChoice(String title, List<_Opt> opts, String current) =>
+      _choiceDialog(context, title, opts, current);
 
-  Future<bool> _confirm(String title, String body, {required String yes, required String no}) async {
-    final r = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: surfaceHigh,
-        shape: _dialogShape,
-        title: Text(title, style: serif(22)),
-        content: Text(body),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(no)),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(yes)),
-        ],
-      ),
-    );
-    return r == true;
-  }
+  Future<bool> _confirm(String title, String body, {required String yes, required String no}) =>
+      _confirmDialog(context, title, body, yes: yes, no: no);
 
   Future<int?> _askInt(String title, int current,
       {String? hint, required int min, required int max, bool allowEmpty = false}) async {
@@ -474,11 +534,12 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
     final cur = _canonNetwork(_str('network'));
     final v = await _askChoice('Network type', _networks, cur);
     if (v == null || v == cur) return;
-    if (v == 'quic' && _m['reality'] is Map) {
-      _toast("QUIC can't be combined with REALITY");
+    if ((v == 'quic' || v == 'kcp') && _m['reality'] is Map) {
+      _toast("REALITY can't be combined with QUIC or mKCP");
       return;
     }
     var droppedFlow = false;
+    var droppedTls = false;
     setState(() {
       _dirty = true;
       if (v == 'tcp') {
@@ -490,14 +551,30 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
         _m.remove('flow');
         droppedFlow = true;
       }
+      if (v == 'kcp') {
+        // mKCP runs over UDP and does not use TLS
+        final t = _m['tls'];
+        if (t is Map) {
+          if (t['enabled'] == true) droppedTls = true;
+          t.remove('enabled');
+          t.remove('pinSha256');
+          t.remove('verifyName');
+          if (t.isEmpty) _m.remove('tls');
+        }
+      }
     });
     if (droppedFlow) _toast('Flow removed: XTLS Vision needs the TCP transport');
+    if (droppedTls) _toast('TLS turned off: mKCP does not use it');
   }
 
   Future<void> _pickFlow() async {
     final cur = _str('flow').toLowerCase();
     final v = await _askChoice('Flow', _flows, cur);
     if (v == null || v == cur) return;
+    if (v.isNotEmpty && _get('mux', 'enabled') == true) {
+      _toast('XTLS Vision cannot be used with Mux. Turn Mux off first');
+      return;
+    }
     final notes = <String>[];
     setState(() {
       _dirty = true;
@@ -607,35 +684,12 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
   }
 
   // ---- row widgets ------------------------------------------------------------
-  Widget _header(String t) => Padding(
-        padding: const EdgeInsets.fromLTRB(20, 18, 20, 4),
-        child: Text(t, style: sans(12.5, w: FontWeight.w600, color: Theme.of(context).colorScheme.primary, spacing: 0.4)),
-      );
+  Widget _header(String t) => _headerTile(context, t);
 
   Widget _divider() => const Divider(height: 1, thickness: 1, color: outline);
 
-  Widget _row(String label, String value, VoidCallback onTap, {bool monospace = false}) {
-    final shown = value.isEmpty ? 'Not set' : value;
-    return InkWell(
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(label, style: Theme.of(context).textTheme.bodyLarge),
-            const SizedBox(height: 2),
-            Text(
-              shown,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: (monospace && value.isNotEmpty) ? mono(12.5, color: textMuted) : Theme.of(context).textTheme.bodySmall,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  Widget _row(String label, String value, VoidCallback onTap, {bool monospace = false}) =>
+      _rowTile(context, label, value, onTap, monospace: monospace);
 
   Widget _switch(String label, String sub, bool value, ValueChanged<bool> onChanged) => SwitchListTile(
         contentPadding: const EdgeInsets.symmetric(horizontal: 20),
@@ -656,6 +710,13 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
         'Server name (SNI)',
         _gs('tls', 'sni'),
         () => _editIn('tls', 'sni', 'Server name (SNI)', hint: 'Server name sent in the TLS handshake.'),
+        monospace: true,
+      );
+
+  Widget _alpnRow() => _row(
+        'ALPN',
+        (_get('tls', 'alpn') is List) ? (_get('tls', 'alpn') as List).join(', ') : '',
+        () => _editList('tls', 'alpn', 'ALPN', hint: 'Comma separated, for example h2, http/1.1.'),
         monospace: true,
       );
 
@@ -705,6 +766,13 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
           _row('Key passphrase', _mask(_str('passphrase')),
               () => _editTop('passphrase', 'Key passphrase', hint: 'Only for an encrypted private key.', trim: false),
               monospace: true),
+          _row(
+            'Host key pin',
+            _gs('advanced', 'sshHostKey'),
+            () => _editIn('advanced', 'sshHostKey', 'Host key pin',
+                hint: 'SHA256:... as printed by ssh-keygen -l, or 64 hex characters. Empty accepts any key.'),
+            monospace: true,
+          ),
         ];
       case 'socks5':
       case 'socks4':
@@ -716,6 +784,7 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
               monospace: true),
           _row('Password', _mask(_str('password')),
               () => _editTop('password', 'Password', trim: false), monospace: true),
+          if (proto == 'http' || proto == 'https') _headersRow(null, 'proxyHeaders'),
         ];
       case 'hysteria2':
         return [
@@ -762,13 +831,13 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
         _row(
           'Upload speed (Mbps)',
           _intIn('hysteria', 'upMbps') == 0 ? '' : '${_intIn('hysteria', 'upMbps')}',
-          () => _editMbps('upMbps', 'Upload speed (Mbps)', hint: 'Required by the server. Empty uses 10.'),
+          () => _editMbps('upMbps', 'Upload speed (Mbps)', hint: 'Sent to the server. Empty uses 10.'),
         ),
       _row(
         'Download speed (Mbps)',
         _intIn('hysteria', 'downMbps') == 0 ? '' : '${_intIn('hysteria', 'downMbps')}',
         () => _editMbps('downMbps', 'Download speed (Mbps)',
-            hint: hy2 ? 'Advertised receive rate. Empty lets the server decide.' : 'Required by the server. Empty uses 50.'),
+            hint: hy2 ? 'Advertised receive rate. Empty lets the server decide.' : 'The server sends at this rate. Empty uses 50.'),
       ),
       _sniRow(),
       _insecureSwitch(),
@@ -776,19 +845,24 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
   }
 
   List<Widget> _transportRows(String net) {
+    final http = net == 'ws' || net == 'httpupgrade' || net == 'h2' || net == 'xhttp';
     return [
       _row('Network type', _label(_networks, net), _pickNetwork),
-      if (net == 'ws' || net == 'httpupgrade' || net == 'h2' || net == 'xhttp') ...[
+      if (http) ...[
         _row('HTTP host', _gs('ws', 'host'),
             () => _editIn('ws', 'host', 'HTTP host', hint: 'Host header sent with the request.'),
             monospace: true),
         _row('HTTP path', _gs('ws', 'path'),
             () => _editIn('ws', 'path', 'HTTP path', hint: 'Client and server must have the same value.'),
             monospace: true),
+        _headersRow('ws', 'headers'),
       ],
-      if (net == 'xhttp')
+      if (net == 'ws') ..._wsRows(),
+      if (net == 'xhttp') ...[
         _row('XHTTP mode', _label(_xhttpModes, _str('xhttpMode')),
             () => _pickTop('xhttpMode', 'XHTTP mode', _xhttpModes)),
+        ..._xhttpRows(),
+      ],
       if (net == 'grpc') ...[
         _row('Host', _gs('ws', 'host'),
             () => _editIn('ws', 'host', 'Host', hint: 'Authority sent with the request.'),
@@ -796,23 +870,24 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
         _row('Service name', _str('grpcService'),
             () => _editTop('grpcService', 'Service name', hint: 'The gRPC service name set on the server.'),
             monospace: true),
+        ..._grpcRows(),
       ],
+      if (net == 'quic') ..._quicRows(),
+      if (net == 'kcp') ..._kcpRows(),
     ];
   }
 
   List<Widget> _securityRows(String net) {
     if (net == 'quic') {
       // QUIC carries its own TLS, so there is no on/off switch here.
-      return [_sniRow(), _insecureSwitch()];
+      return [_sniRow(), _alpnRow(), _insecureSwitch()];
     }
     final sec = _security();
     return [
       _row('Security', _label(_securities, sec), () => _pickSecurity(net)),
       if (sec == 'tls') ...[
         _sniRow(),
-        _row('ALPN', (_get('tls', 'alpn') is List) ? (_get('tls', 'alpn') as List).join(', ') : '',
-            () => _editList('tls', 'alpn', 'ALPN', hint: 'Comma separated, for example h2, http/1.1.'),
-            monospace: true),
+        _alpnRow(),
         _row('Fingerprint', _label(_fingerprints, _gs('tls', 'fingerprint').toLowerCase()),
             () => _pickIn('tls', 'fingerprint', 'Fingerprint', _fingerprints)),
         _insecureSwitch(),
@@ -867,15 +942,33 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
       children
         ..add(_divider())
         ..add(_header('Transport'))
-        ..addAll(_transportRows(net))
-        ..add(_divider())
-        ..add(_header('Transport layer encryption'))
-        ..addAll(_securityRows(net));
+        ..addAll(_transportRows(net));
+      if (net != 'kcp') {
+        children
+          ..add(_divider())
+          ..add(_header('Transport layer encryption'))
+          ..addAll(_securityRows(net));
+      }
+      if (net != 'quic' && net != 'kcp') {
+        children
+          ..add(_divider())
+          ..add(_header('Payload'))
+          ..addAll(_payloadRows())
+          ..add(_divider())
+          ..add(_header('Fragment'))
+          ..addAll(_fragmentRows());
+      }
+      if (_muxable(proto)) {
+        children
+          ..add(_divider())
+          ..add(_header('Multiplexing'))
+          ..addAll(_muxRows());
+      }
     }
     children
       ..add(_divider())
       ..add(_header('Advanced'))
-      ..add(_row('Edit as JSON', 'Fragment, mux, payload, backups and any other field', _openJson));
+      ..addAll(_advancedRows());
 
     return PopScope(
       canPop: !_dirty,

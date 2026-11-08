@@ -120,6 +120,7 @@ class Settings {
   bool autoFastest, useBackups, connectionCheck;
   int subRefreshHours;
 
+
   Map<String, Object?> toMap() => {
         'accentIndex': accentIndex, 'customAccent': customAccent, 'mode': mode, 'mtu': mtu, 'dns': dns,
         'fakeDns': fakeDns, 'sniff': sniff, 'socksListen': socksListen, 'socksUser': socksUser,

@@ -96,6 +96,7 @@ class AppStore extends ChangeNotifier {
     _saveProfiles();
   }
 
+
   // ---- more profile tools ----------------------------------------------------
   void duplicateProfile(Profile p) {
     final id = DateTime.now().microsecondsSinceEpoch.toString();

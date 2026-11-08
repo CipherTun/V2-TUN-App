@@ -22,6 +22,11 @@ rm -rf "$APP/kotlin" "$APP/java"
 mkdir -p "$APP/kotlin"
 cp -r "$SRC/android_src/kotlin/." "$APP/kotlin/"
 cp "$SRC/android_src/AndroidManifest.xml" "$APP/AndroidManifest.xml"
+# Launcher icon: replaces the default Flutter mipmaps (mdpi to xxxhdpi).
+if [ -d "$SRC/android_src/res" ]; then
+  mkdir -p "$APP/res"
+  cp -r "$SRC/android_src/res/." "$APP/res/"
+fi
 
 # 3. The tunnel library as an AAR (gomobile gives it the Java package io.surprise.mobile).
 mkdir -p android/app/libs

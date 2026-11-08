@@ -13,15 +13,7 @@ flutter create --org io.surprise --project-name vpn --platforms android "$OUT"
 cd "$OUT"
 rm -rf lib test
 cp -r "$SRC/lib" lib
-mkdir -p assets/fonts
-# Bundled fonts (open source, SIL OFL). Fetched from the google/fonts repository when not already present.
-fetch_font() { # <repo path> <file name>
-  if [ -f "$SRC/assets/fonts/$2" ]; then cp "$SRC/assets/fonts/$2" "assets/fonts/$2"
-  else curl -fsSL -o "assets/fonts/$2" "https://raw.githubusercontent.com/google/fonts/main/$1"; fi
-}
-fetch_font 'ofl/dmsans/DMSans%5Bopsz,wght%5D.ttf' DMSans.ttf
-fetch_font 'ofl/newsreader/Newsreader%5Bopsz,wght%5D.ttf' Newsreader.ttf
-fetch_font 'ofl/jetbrainsmono/JetBrainsMono%5Bwght%5D.ttf' JetBrainsMono.ttf
+cp -r "$SRC/assets" assets
 cp "$SRC/pubspec.yaml" pubspec.yaml
 
 # 2. Native side.

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-label="V2-TUN">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1220"/><stop offset="1" stop-color="#080b10"/>
+    </linearGradient>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#4285F4"/><stop offset="0.33" stop-color="#EA4335"/>
+      <stop offset="0.66" stop-color="#FBBC05"/><stop offset="1" stop-color="#34A853"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="300" rx="24" fill="url(#bg)"/>
+  <circle cx="230" cy="150" r="82" fill="none" stroke="url(#g)" stroke-width="10"/>
+  <circle cx="230" cy="150" r="64" fill="#10151d" stroke="#28344a"/>
+  <path d="M230 112v38" stroke="#8ab4f8" stroke-width="9" stroke-linecap="round"/>
+  <path d="M203 132a38 38 0 1 0 54 0" fill="none" stroke="#8ab4f8" stroke-width="9" stroke-linecap="round"/>
+  <text x="380" y="150" font-family="Georgia, 'Times New Roman', serif" font-size="84" fill="#e6ebf3">V2-TUN</text>
+  <text x="384" y="196" font-family="Helvetica, Arial, sans-serif" font-size="26" fill="#8795ab">A Flutter and Kotlin client for the io.surprise.vpn tunnel library</text>
+  <rect x="384" y="222" width="360" height="5" rx="2.5" fill="url(#g)"/>
+</svg>

@@ -1,184 +1,134 @@
-name: Build Android APK
+name: Build AAR and APKs
 
 on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
   workflow_dispatch:
     inputs:
-      build_type:
-        description: "release (signed) or debug (faster)"
-        type: choice
-        options: [release, debug]
-        default: release
-  push:
-    branches: [main, "integrate/**"]
-    paths-ignore: ["**.md", "assets/icon/preview.png"]
-    tags: ["v*"]
+      lib_repo:
+        description: "Tunnel library repository"
+        default: "CipherTun/V2-TUN"
+      lib_ref:
+        description: "Tunnel library branch, tag or commit"
+        default: "fix/review-20261104"
 
-permissions:
-  contents: write   # needed to attach APKs to a release on tags
+env:
+  LIB_REPO: ${{ inputs.lib_repo || 'CipherTun/V2-TUN' }}
+  LIB_REF: ${{ inputs.lib_ref || 'fix/review-20261104' }}
+  NDK_VERSION: "27.2.12479018"
 
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  android:
+  # Job 1: compile the Go tunnel library into an Android AAR with gomobile.
+  build-aar:
+    name: Build v2tun.aar
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v6
-
-      # Phone-friendly: upload xray_vpn.zip to the repo root and this step unpacks it.
-      # If the project files are already in the repo, the step does nothing.
-      - name: Unpack project zip
-        run: |
-          if [ -f xray_vpn.zip ]; then
-            rm -rf _src && mkdir _src && unzip -q xray_vpn.zip -d _src
-            P="$(find _src -maxdepth 3 -name pubspec.yaml | head -1)"
-            [ -n "$P" ] && cp -R "$(dirname "$P")"/. .
-            rm -rf _src
-          fi
-          test -f pubspec.yaml || { echo "::error::pubspec.yaml not found. Upload xray_vpn.zip to the repository root."; exit 1; }
-          ls
-
-      - name: Load pinned versions
-        run: grep -E '^[A-Z0-9_]+=' scripts/versions.env >> "$GITHUB_ENV"
-
-      # ── Tunnel library: V2-TUN -> v2tun.aar (gomobile) ──
-      # Checked out first so setup-go can key its dependency cache on the library's go.sum.
-      # If the library repository is private, add a repo secret V2TUN_TOKEN
-      # (a token with read access to it).
-      - name: Check out V2-TUN
-        uses: actions/checkout@v6
+      - name: Check out the tunnel library
+        uses: actions/checkout@v4
         with:
-          repository: ${{ env.V2TUN_REPO }}
-          ref: ${{ env.V2TUN_REF }}
-          path: v2-tun
-          token: ${{ secrets.V2TUN_TOKEN || github.token }}
+          repository: ${{ env.LIB_REPO }}
+          ref: ${{ env.LIB_REF }}
+          path: V2-TUN
 
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      # Caches only downloaded Go modules and Go's build cache. The build cache is
-      # content-addressed, so any change to the library source is always recompiled.
-      # The built v2tun.aar itself is NEVER cached.
-      - uses: actions/setup-go@v6
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          go-version: stable
-          check-latest: true
-          cache: true
-          cache-dependency-path: v2-tun/go.sum
+          go-version-file: V2-TUN/go.mod
+          cache-dependency-path: V2-TUN/go.sum
 
-      - uses: subosito/flutter-action@v2
+      - name: Install the Android NDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;${NDK_VERSION}" "platforms;android-34"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Install gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
+
+      - name: Bind the library (same command as setup.sh)
+        working-directory: V2-TUN
+        run: |
+          go mod tidy
+          go get golang.org/x/mobile/bind
+          gomobile bind -target=android -javapkg=io.surprise -o "$GITHUB_WORKSPACE/v2tun.aar" io.surprise.vpn/mobile
+          ls -lh "$GITHUB_WORKSPACE/v2tun.aar"
+
+      - name: Upload the AAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: v2tun-aar
+          path: v2tun.aar
+          if-no-files-found: error
+
+  # Job 2: runs only after the AAR exists. Uses setup.sh with the prebuilt AAR.
+  build-apk:
+    name: Build APKs
+    needs: build-aar
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check out the app
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
-      # Gradle downloads/wrapper only (no project outputs, no aar).
-      - name: Cache Gradle
-        uses: actions/cache@v5
+      - name: Download the AAR next to setup.sh
+        uses: actions/download-artifact@v4
         with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('pubspec.yaml', 'scripts/versions.env') }}
-          restore-keys: gradle-${{ runner.os }}-
+          name: v2tun-aar
+          path: .
 
-      - name: Build v2tun.aar (always fresh)
+      - name: Create the Flutter project (setup.sh picks up v2tun.aar)
         run: |
-          rm -rf android-libs
-          echo "V2-TUN commit: $(git -C v2-tun rev-parse HEAD)"
-          V2TUN_DIR="$PWD/v2-tun" bash ./scripts/build_core.sh
-          test -s android-libs/v2tun.aar || { echo "::error::v2tun.aar was not produced"; exit 1; }
+          test -f v2tun.aar
+          bash setup.sh "$RUNNER_TEMP/v2tun_flutter"
 
-      # ── Project scaffolding, icons ──
-      - name: Prepare Flutter project
-        run: bash ./scripts/ci_prepare.sh
-
-      # ── Signing ──
-      # Preferred: add repo secrets ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD,
-      # ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD. Otherwise a key is generated once and cached,
-      # so updates keep installing over each other (as long as the cache is alive).
-      - name: Restore cached signing key
-        if: inputs.build_type != 'debug'
-        id: keycache
-        uses: actions/cache@v5
-        with:
-          path: ~/.xray-signing
-          key: xray-signing-key-v1
-
-      - name: Configure signing
-        if: inputs.build_type != 'debug'
-        env:
-          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          mkdir -p ~/.xray-signing
-          if [ -n "${KS_B64:-}" ]; then
-            echo "$KS_B64" | base64 --decode > ~/.xray-signing/release.jks
-            STORE_PASS="$KS_PASS"; ALIAS="${KEY_ALIAS:-xray}"; KPASS="${KEY_PASS:-$KS_PASS}"
-            echo "Using the keystore from repository secrets"
-          elif [ -f ~/.xray-signing/release.jks ] && [ -f ~/.xray-signing/pass.txt ]; then
-            STORE_PASS="$(cat ~/.xray-signing/pass.txt)"; ALIAS=xray; KPASS="$STORE_PASS"
-            echo "Using the cached signing key"
-          else
-            STORE_PASS="$(openssl rand -hex 16)"; ALIAS=xray; KPASS="$STORE_PASS"
-            keytool -genkeypair -v -keystore ~/.xray-signing/release.jks -storetype PKCS12 \
-              -alias "$ALIAS" -keyalg RSA -keysize 4096 -validity 36500 \
-              -storepass "$STORE_PASS" -keypass "$KPASS" \
-              -dname "CN=XRay VPN, O=io.surprise, C=US"
-            echo "$STORE_PASS" > ~/.xray-signing/pass.txt
-            echo "Generated a new signing key (cached for later builds)"
-          fi
-          cat > android/key.properties <<EOP
-          storeFile=$HOME/.xray-signing/release.jks
-          storePassword=$STORE_PASS
-          keyAlias=$ALIAS
-          keyPassword=$KPASS
-          EOP
-          sed -i 's/^ *//' android/key.properties
-
-      # ── Build ──
       - name: Build release APKs
-        if: inputs.build_type != 'debug'
-        run: |
-          flutter build apk --release --split-per-abi --build-number ${{ github.run_number }}
-          flutter build apk --release --build-number ${{ github.run_number }}
-          mkdir -p dist
-          cp build/app/outputs/flutter-apk/app-release.apk dist/XRayVPN-universal.apk
-          for a in arm64-v8a armeabi-v7a x86_64; do
-            f=build/app/outputs/flutter-apk/app-$a-release.apk
-            [ -f "$f" ] && cp "$f" "dist/XRayVPN-$a.apk"
-          done
-          ls -la dist
+        working-directory: ${{ runner.temp }}/v2tun_flutter
+        run: flutter build apk --release --split-per-abi
 
-      - name: Build debug APK
-        if: inputs.build_type == 'debug'
+      - name: Collect APKs
         run: |
-          flutter build apk --debug --build-number ${{ github.run_number }}
-          mkdir -p dist && cp build/app/outputs/flutter-apk/app-debug.apk dist/XRayVPN-debug.apk
+          mkdir -p dist
+          cp "$RUNNER_TEMP"/v2tun_flutter/build/app/outputs/flutter-apk/app-*-release.apk dist/
+          cd dist
+          for f in app-*-release.apk; do mv "$f" "V2-TUN-${f#app-}"; done
+          ls -lh
 
       - name: Upload APKs
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         with:
-          name: XRayVPN-apks
+          name: v2tun-apks
           path: dist/*.apk
-          retention-days: 30
+          if-no-files-found: error
 
-      - name: Attach to GitHub release (tags)
+      - name: Attach APKs and AAR to the release (tags only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.apk
-          generate_release_notes: true
-
-      # Runs after the APKs are already uploaded, so it never delays them.
-      # Never blocks the build, read the log if the app misbehaves.
-      - name: Analyze
-        if: inputs.build_type != 'debug'
-        continue-on-error: true
-        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+          files: |
+            dist/*.apk
+            v2tun.aar

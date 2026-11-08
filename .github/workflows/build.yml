@@ -64,7 +64,7 @@ jobs:
         run: |
           go mod tidy
           go get golang.org/x/mobile/bind
-          gomobile bind -target=android -javapkg=io.surprise -o "$GITHUB_WORKSPACE/v2tun.aar" io.surprise.vpn/mobile
+          gomobile bind -target=android -androidapi 21 -javapkg=io.surprise -o "$GITHUB_WORKSPACE/v2tun.aar" io.surprise.vpn/mobile
           ls -lh "$GITHUB_WORKSPACE/v2tun.aar"
 
       - name: Upload the AAR

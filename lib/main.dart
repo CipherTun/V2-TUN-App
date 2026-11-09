@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'core/store.dart';
 import 'ui/shell.dart';
 import 'ui/theme.dart';
+import 'ui/widgets.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -28,12 +29,16 @@ class V2TunApp extends StatelessWidget {
           theme: buildTheme(s.settings.accent, Brightness.dark),
           darkTheme: buildTheme(s.settings.accent, Brightness.dark),
           themeMode: ThemeMode.dark,
+          // The gradient is painted once behind every page, so pages can be transparent.
           // Text scale is clamped so a huge system font size cannot break layouts.
-          builder: (context, child) => MediaQuery(
-            data: MediaQuery.of(context).copyWith(
-              textScaler: MediaQuery.of(context).textScaler.clamp(minScaleFactor: 0.9, maxScaleFactor: 1.15),
+          builder: (context, child) => AppBackdrop(
+            accent: s.settings.accent,
+            child: MediaQuery(
+              data: MediaQuery.of(context).copyWith(
+                textScaler: MediaQuery.of(context).textScaler.clamp(minScaleFactor: 0.9, maxScaleFactor: 1.15),
+              ),
+              child: child!,
             ),
-            child: child!,
           ),
           home: const Shell(),
         );

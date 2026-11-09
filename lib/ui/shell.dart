@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../core/store.dart';
 import 'configs_screen.dart';
 import 'dashboard_screen.dart';
 import 'logs_screen.dart';
@@ -18,6 +19,7 @@ class ShellState extends State<Shell> {
 
   @override
   Widget build(BuildContext context) {
+    final calm = StoreScope.of(context).settings.reduceMotion;
     final pages = [
       DashboardScreen(onOpenConfigs: () => go(1)),
       const ConfigsScreen(),
@@ -29,7 +31,7 @@ class ShellState extends State<Shell> {
       body: SafeArea(
         bottom: false,
         child: AnimatedSwitcher(
-          duration: const Duration(milliseconds: 320),
+          duration: Duration(milliseconds: calm ? 0 : 320),
           switchInCurve: Curves.easeOutCubic,
           switchOutCurve: Curves.easeInCubic,
           transitionBuilder: (child, anim) => FadeTransition(

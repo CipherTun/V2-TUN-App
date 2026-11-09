@@ -3,10 +3,17 @@ import 'package:flutter/material.dart';
 
 import '../core/models.dart';
 
-const googleBlue = Color(0xFF4285F4);
-const googleRed = Color(0xFFEA4335);
-const googleYellow = Color(0xFFFBBC05);
-const googleGreen = Color(0xFF34A853);
+// ---- palette -----------------------------------------------------------------
+// Greyish blue over black, one soft accent. Taken from the Xray dashboard design.
+
+/// Status colors. The google* names are kept so every page that used them keeps compiling.
+const good = Color(0xFF5FC48D);
+const warn = Color(0xFFE7B452);
+const bad = Color(0xFFE5697A);
+const googleBlue = Color(0xFF5B8DEF);
+const googleRed = bad;
+const googleYellow = warn;
+const googleGreen = good;
 const googleColors = [googleBlue, googleRed, googleYellow, googleGreen];
 
 class Accent {
@@ -15,30 +22,37 @@ class Accent {
   final Color color;
 }
 
-/// Seven presets. Index 0 is the default and animates through the four Google colors.
+/// Seven presets. Index 0 is the default, a calm slightly desaturated turquoise.
 const accents = [
-  Accent('Google', Color(0xFF8AB4F8)),
+  Accent('Lagoon', Color(0xFF5BB8AE)),
+  Accent('Blue', Color(0xFF5B8DEF)),
   Accent('Steel', Color(0xFF7C9CBF)),
-  Accent('Coral', Color(0xFFFF8A75)),
-  Accent('Amber', Color(0xFFF6BF4B)),
-  Accent('Emerald', Color(0xFF4FD1A1)),
-  Accent('Violet', Color(0xFFA78BFA)),
-  Accent('Rose', Color(0xFFF472B6)),
+  Accent('Green', Color(0xFF63C58A)),
+  Accent('Pink', Color(0xFFE7799F)),
+  Accent('Teal', Color(0xFF1FA3A0)),
+  Accent('Amber', Color(0xFFE7B452)),
 ];
 const customIndex = 7;
 
 extension SettingsAccent on Settings {
-  bool get isGoogle => accentIndex == 0;
+  /// Kept for older code; there is no multi-color accent any more.
+  bool get isGoogle => false;
   Color get accent => accentIndex == customIndex ? Color(customAccent) : accents[accentIndex.clamp(0, 6)].color;
 }
 
-// Greyish blue and black surfaces.
-const bg = Color(0xFF080B10);
-const surface = Color(0xFF10151D);
-const surfaceHigh = Color(0xFF182030);
-const outline = Color(0xFF28344A);
-const textPrimary = Color(0xFFE6EBF3);
-const textMuted = Color(0xFF8795AB);
+const bg = Color(0xFF090D13); // top of the page gradient
+const bgBottom = Color(0xFF17212F); // bottom of the page gradient
+const steel = Color(0xFF3F5878); // greyish blue
+const surface = Color(0xFF131C28); // dialogs and sheets (solid)
+const surfaceHigh = Color(0xFF1C2735);
+const outline = Color(0xFF2A3544);
+const textPrimary = Color(0xFFE9EFF6);
+const textMuted = Color(0xFF8DA0B6);
+const glass = Color(0x0EFFFFFF); // white at 5.5%: cards over the gradient
+const glassStroke = Color(0x1AFFFFFF); // white at 10%
+
+/// Text color that stays readable on top of [accent].
+Color onAccent(Color accent) => accent.computeLuminance() > .45 ? const Color(0xFF0A1118) : Colors.white;
 
 TextStyle sans(double size, {FontWeight w = FontWeight.w400, Color? color, double? height, double? spacing}) => TextStyle(
       fontFamily: 'DMSans', fontSize: size, color: color, height: height, letterSpacing: spacing,
@@ -54,9 +68,10 @@ TextStyle mono(double size, {Color? color}) =>
     TextStyle(fontFamily: 'JetBrainsMono', fontSize: size, color: color, height: 1.4);
 
 ThemeData buildTheme(Color accent, Brightness b) {
+  final on = onAccent(accent);
   final scheme = ColorScheme.fromSeed(seedColor: accent, brightness: Brightness.dark).copyWith(
     primary: accent,
-    onPrimary: const Color(0xFF05080D),
+    onPrimary: on,
     surface: surface,
     onSurface: textPrimary,
     surfaceContainerLowest: bg,
@@ -84,19 +99,23 @@ ThemeData buildTheme(Color accent, Brightness b) {
   return ThemeData(
     useMaterial3: true,
     colorScheme: scheme,
-    scaffoldBackgroundColor: bg,
+    // Transparent: the page gradient is painted once, behind the whole navigator (see AppBackdrop).
+    scaffoldBackgroundColor: Colors.transparent,
     textTheme: text,
     fontFamily: 'DMSans',
     splashFactory: InkSparkle.splashFactory,
+    dividerColor: glassStroke,
     appBarTheme: AppBarTheme(
       backgroundColor: Colors.transparent, elevation: 0, scrolledUnderElevation: 0, titleTextStyle: text.titleLarge,
     ),
+    // Cards are frosted glass: a faint white over the gradient with a hairline border.
     cardTheme: CardThemeData(
-      color: surface, elevation: 0, margin: EdgeInsets.zero,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22), side: const BorderSide(color: outline)),
+      color: glass, elevation: 0, margin: EdgeInsets.zero, surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24), side: const BorderSide(color: glassStroke)),
     ),
     navigationBarTheme: NavigationBarThemeData(
-      backgroundColor: surface.withValues(alpha: 0.96),
+      backgroundColor: surface.withValues(alpha: 0.88),
+      surfaceTintColor: Colors.transparent,
       indicatorColor: accent.withValues(alpha: 0.18),
       height: 70,
       labelTextStyle: WidgetStateProperty.resolveWith((s) =>
@@ -106,9 +125,12 @@ ThemeData buildTheme(Color accent, Brightness b) {
           (s) => IconThemeData(color: s.contains(WidgetState.selected) ? accent : textMuted)),
     ),
     switchTheme: SwitchThemeData(
-      thumbColor: WidgetStateProperty.resolveWith((s) => s.contains(WidgetState.selected) ? const Color(0xFF05080D) : textMuted),
-      trackColor: WidgetStateProperty.resolveWith((s) => s.contains(WidgetState.selected) ? accent : surfaceHigh),
-      trackOutlineColor: WidgetStateProperty.resolveWith((s) => s.contains(WidgetState.selected) ? accent : outline),
+      thumbColor: WidgetStateProperty.resolveWith((s) => s.contains(WidgetState.selected) ? on : textMuted),
+      trackColor: WidgetStateProperty.resolveWith((s) => s.contains(WidgetState.selected) ? accent : textMuted.withValues(alpha: 0.25)),
+      trackOutlineColor: WidgetStateProperty.all(Colors.transparent),
+    ),
+    sliderTheme: SliderThemeData(
+      activeTrackColor: accent, thumbColor: accent, inactiveTrackColor: textMuted.withValues(alpha: 0.25),
     ),
     inputDecorationTheme: InputDecorationTheme(
       filled: true, fillColor: surfaceHigh,
@@ -116,9 +138,18 @@ ThemeData buildTheme(Color accent, Brightness b) {
       focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide(color: accent)),
       labelStyle: text.bodySmall,
     ),
+    dialogTheme: DialogThemeData(
+      backgroundColor: surface,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
+    ),
+    bottomSheetTheme: const BottomSheetThemeData(
+      backgroundColor: surface,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+    ),
     snackBarTheme: SnackBarThemeData(
       behavior: SnackBarBehavior.floating, backgroundColor: surfaceHigh, contentTextStyle: text.bodyMedium,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
     ),
     pageTransitionsTheme: const PageTransitionsTheme(builders: {
       TargetPlatform.android: FadeForwardsPageTransitionsBuilder(),
@@ -126,7 +157,7 @@ ThemeData buildTheme(Color accent, Brightness b) {
   );
 }
 
-/// A rotating ring painted with the four Google colors, or with shades of one accent.
+/// A rotating ring painted with a few colors. No page uses it for the connect button any more.
 class SweepRing extends StatelessWidget {
   const SweepRing({super.key, required this.angle, required this.size, required this.stroke, required this.colors, this.opacity = 1});
   final double angle; // radians
@@ -155,8 +186,7 @@ class SweepRing extends StatelessWidget {
   }
 }
 
-List<Color> ringColors(Settings s) => s.isGoogle
-    ? googleColors
-    : [s.accent, s.accent.withValues(alpha: 0.25), s.accent, s.accent.withValues(alpha: 0.25)];
+List<Color> ringColors(Settings s) =>
+    [s.accent, s.accent.withValues(alpha: 0.25), s.accent, s.accent.withValues(alpha: 0.25)];
 
 double wobble(double t, double phase) => math.sin(t * 2 * math.pi + phase);

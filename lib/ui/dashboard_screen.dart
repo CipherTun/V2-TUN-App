@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -7,17 +7,13 @@ import '../core/models.dart';
 import '../core/store.dart';
 import 'settings_screen.dart';
 import 'theme.dart';
+import 'widgets.dart';
 
-String fmtBytes(num b) {
-  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
-  var v = b.toDouble(), i = 0;
-  while (v >= 1024 && i < u.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return '${v.toStringAsFixed(i == 0 ? 0 : 1)} ${u[i]}';
-}
+// Other pages import fmtBytes from here.
+export 'widgets.dart' show fmtBytes;
 
+/// The dashboard, ported from the Xray design: brand row, connect dial, status, the selected
+/// server, live rates, a throughput chart and the routing choice. The dial does not animate.
 class DashboardScreen extends StatelessWidget {
   const DashboardScreen({super.key, required this.onOpenConfigs});
   final VoidCallback onOpenConfigs;
@@ -25,261 +21,218 @@ class DashboardScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final st = StoreScope.of(context);
-    final p = st.selected;
+    final s = st.settings;
+    final sel = st.selected;
+    final accent = s.accent;
+    final on = st.state == ConnState.connected;
+    final busy = st.state == ConnState.connecting || st.state == ConnState.disconnecting;
+    final failed = st.state == ConnState.disconnected && st.error != null;
+
+    final (headline, sub) = switch (st.state) {
+      ConnState.connected => ('Protected', ''),
+      ConnState.connecting => ('Securing connection', 'Checking that traffic passes'),
+      ConnState.disconnecting => ('Disconnecting', 'One moment'),
+      ConnState.disconnected => failed
+          ? ('Could not connect', st.error!)
+          : ('Not protected', sel == null ? 'Add a config to begin' : 'Tap the dial to connect'),
+    };
+
     return ListView(
-      padding: const EdgeInsets.fromLTRB(20, 8, 20, 110),
+      padding: const EdgeInsets.fromLTRB(20, 6, 20, 120),
       children: [
         Row(children: [
-          // Settings, top left.
-          IconButton.filledTonal(
-            tooltip: 'Settings',
-            icon: const Icon(Icons.tune_rounded),
-            onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const SettingsScreen())),
-          ),
-          const SizedBox(width: 14),
-          Text('V2-TUN', style: serif(26)),
-          const Spacer(),
-          _ModeChip(mode: st.settings.mode),
-        ]),
-        const SizedBox(height: 28),
-        const Center(child: ConnectOrb()),
-        const SizedBox(height: 22),
-        Center(child: _StatusText(st: st)),
-        const SizedBox(height: 26),
-        _ProfileCard(profile: p, onTap: onOpenConfigs),
-        const SizedBox(height: 14),
-        Row(children: [
-          Expanded(child: _Stat(icon: Icons.south_rounded, label: 'Download', value: st.downBps, total: st.downBytes, color: googleGreen)),
-          const SizedBox(width: 12),
-          Expanded(child: _Stat(icon: Icons.north_rounded, label: 'Upload', value: st.upBps, total: st.upBytes, color: googleBlue)),
-        ]),
-        const SizedBox(height: 12),
-        _Uptime(since: st.connectedAt),
-        const SizedBox(height: 12),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+          Expanded(
             child: Row(children: [
-              const Icon(Icons.data_usage_rounded, size: 20, color: textMuted),
+              Container(
+                width: 34,
+                height: 34,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(11),
+                  gradient: LinearGradient(colors: [accent, steel]),
+                ),
+                child: Icon(Icons.bolt_rounded, color: onAccent(accent), size: 21),
+              ),
               const SizedBox(width: 10),
-              Text('Usage', style: Theme.of(context).textTheme.labelMedium),
-              const Spacer(),
-              Text('today ${fmtBytes(st.todayBytes)}  ·  all ${fmtBytes(st.lifetimeBytes)}', style: mono(12.5, color: textPrimary)),
+              Text('V2-TUN', style: serif(26)),
+              const SizedBox(width: 10),
+              InfoPill(s.mode == 'tun' ? 'TUN' : 'SOCKS5', color: textMuted),
             ]),
           ),
+          GlassIconButton(
+            icon: Icons.tune_rounded,
+            tooltip: 'Settings',
+            onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const SettingsScreen())),
+          ),
+        ]),
+        const SizedBox(height: 22),
+        Center(
+          child: ConnectOrb(
+            on: on,
+            busy: busy,
+            accent: accent,
+            animate: !s.reduceMotion,
+            onTap: () {
+              if (s.haptics) HapticFeedback.mediumImpact();
+              st.toggle();
+            },
+          ),
+        ),
+        const SizedBox(height: 18),
+        Center(child: Text(headline, textAlign: TextAlign.center, style: serif(28))),
+        const SizedBox(height: 4),
+        Center(
+          child: on
+              ? _Uptime(since: st.connectedAt, color: accent)
+              : ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 320),
+                  child: Text(
+                    sub,
+                    textAlign: TextAlign.center,
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                    style: sans(14, color: failed ? bad : textMuted),
+                  ),
+                ),
+        ),
+        const SizedBox(height: 22),
+        GlassPanel(
+          onTap: onOpenConfigs,
+          child: Row(children: [
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(color: accent.withValues(alpha: .18), borderRadius: BorderRadius.circular(14)),
+              child: Icon(sel?.protocol == 'ssh' ? Icons.terminal_rounded : Icons.public_rounded, color: accent, size: 22),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(sel?.name ?? 'No config selected',
+                    maxLines: 1, overflow: TextOverflow.ellipsis, style: sans(16, w: FontWeight.w800)),
+                const SizedBox(height: 2),
+                Text(sel == null ? 'Tap to add one' : '${sel.protocol.toUpperCase()}  ·  ${sel.server}',
+                    maxLines: 1, overflow: TextOverflow.ellipsis, style: sans(12.5, color: textMuted)),
+              ]),
+            ),
+            if (sel?.pingMs != null) InfoPill(sel!.pingMs! < 0 ? 'Timeout' : '${sel.pingMs} ms', color: latencyColor(sel.pingMs)),
+            const SizedBox(width: 6),
+            const Icon(Icons.unfold_more_rounded, color: textMuted),
+          ]),
+        ),
+        const SizedBox(height: 12),
+        Row(children: [
+          Expanded(child: _Stat(icon: Icons.south_rounded, label: 'Download', value: st.downBps, total: st.downBytes, accent: accent, animate: !s.reduceMotion)),
+          const SizedBox(width: 12),
+          Expanded(child: _Stat(icon: Icons.north_rounded, label: 'Upload', value: st.upBps, total: st.upBytes, accent: accent, animate: !s.reduceMotion)),
+        ]),
+        const SizedBox(height: 12),
+        GlassPanel(
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Text('Throughput', style: sans(13, w: FontWeight.w700, color: textMuted)),
+              const Spacer(),
+              Text('last ${st.downHistory.length} s', style: sans(12, color: textMuted)),
+            ]),
+            const SizedBox(height: 8),
+            Throughput(st.downHistory, color: accent),
+          ]),
+        ),
+        const SizedBox(height: 12),
+        GlassPanel(
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Routing', style: sans(13, w: FontWeight.w700, color: textMuted)),
+            const SizedBox(height: 10),
+            Wrap(spacing: 8, runSpacing: 8, children: [
+              for (final (v, l) in const [('all', 'Everything'), ('lan', 'Skip local network'), ('direct', 'Direct by default')])
+                ChoiceChip(
+                  label: Text(l),
+                  selected: _route(s) == v,
+                  onSelected: (_) {
+                    switch (v) {
+                      case 'all':
+                        s.routeDefault = 'proxy';
+                        s.bypassLan = false;
+                      case 'lan':
+                        s.routeDefault = 'proxy';
+                        s.bypassLan = true;
+                      case 'direct':
+                        s.routeDefault = 'direct';
+                    }
+                    st.saveSettings();
+                    if (st.state == ConnState.connected) {
+                      ScaffoldMessenger.of(context)
+                        ..hideCurrentSnackBar()
+                        ..showSnackBar(const SnackBar(content: Text('Routing changes apply the next time you connect.')));
+                    }
+                  },
+                  showCheckmark: false,
+                  selectedColor: accent.withValues(alpha: .18),
+                  labelStyle: sans(12.5, w: FontWeight.w700, color: _route(s) == v ? accent : textPrimary),
+                  side: BorderSide(color: _route(s) == v ? accent.withValues(alpha: .5) : glassStroke),
+                  backgroundColor: Colors.transparent,
+                ),
+            ]),
+          ]),
+        ),
+        const SizedBox(height: 12),
+        GlassPanel(
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+          child: Row(children: [
+            const Icon(Icons.data_usage_rounded, size: 20, color: textMuted),
+            const SizedBox(width: 10),
+            Text('Usage', style: Theme.of(context).textTheme.labelMedium),
+            const Spacer(),
+            Text('today ${fmtBytes(st.todayBytes)}  ·  all ${fmtBytes(st.lifetimeBytes)}', style: mono(12.5, color: textPrimary)),
+          ]),
         ),
       ],
     );
   }
-}
 
-class _ModeChip extends StatelessWidget {
-  const _ModeChip({required this.mode});
-  final String mode;
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-      decoration: BoxDecoration(color: surfaceHigh, borderRadius: BorderRadius.circular(20), border: Border.all(color: outline)),
-      child: Text(mode == 'tun' ? 'TUN · system-wide' : 'SOCKS5 · local', style: Theme.of(context).textTheme.labelMedium),
-    );
+  static String _route(Settings s) {
+    if (s.routeDefault == 'direct') return 'direct';
+    return s.bypassLan ? 'lan' : 'all';
   }
 }
 
-class _StatusText extends StatelessWidget {
-  const _StatusText({required this.st});
-  final AppStore st;
+class _Stat extends StatelessWidget {
+  const _Stat({required this.icon, required this.label, required this.value, required this.total, required this.accent, required this.animate});
+  final IconData icon;
+  final String label;
+  final double value;
+  final int total;
+  final Color accent;
+  final bool animate;
   @override
   Widget build(BuildContext context) {
-    final (title, sub) = switch (st.state) {
-      ConnState.connected => ('Protected', 'Traffic is flowing through the tunnel'),
-      ConnState.connecting => ('Connecting', 'Building the tunnel'),
-      ConnState.disconnecting => ('Disconnecting', 'Closing the tunnel'),
-      ConnState.disconnected => ('Not connected', st.error ?? 'Tap to connect'),
-    };
-    return AnimatedSwitcher(
-      duration: const Duration(milliseconds: 250),
-      child: Column(key: ValueKey('$title$sub'), children: [
-        Text(title, style: serif(30)),
-        const SizedBox(height: 4),
-        ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 300),
-          child: Text(sub, textAlign: TextAlign.center, maxLines: 3, overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(color: st.error != null && st.state == ConnState.disconnected ? googleRed : null)),
+    return GlassPanel(
+      padding: const EdgeInsets.all(14),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(icon, size: 16, color: accent),
+          const SizedBox(width: 6),
+          Text(label, style: sans(12.5, w: FontWeight.w700, color: textMuted)),
+        ]),
+        const SizedBox(height: 10),
+        TweenAnimationBuilder<double>(
+          tween: Tween(end: value),
+          duration: Duration(milliseconds: animate ? 600 : 0),
+          curve: Curves.easeOutCubic,
+          builder: (_, v, __) => Text('${fmtBytes(v)}/s', style: mono(17, color: textPrimary).copyWith(fontWeight: FontWeight.w700)),
         ),
+        const SizedBox(height: 2),
+        Text('Total ${fmtBytes(total)}', style: sans(11.5, color: textMuted)),
       ]),
     );
   }
 }
 
-/// The big connect button: a rotating ring (Google colors by default), pulsing rings while connected.
-class ConnectOrb extends StatefulWidget {
-  const ConnectOrb({super.key});
-  @override
-  State<ConnectOrb> createState() => _ConnectOrbState();
-}
-
-class _ConnectOrbState extends State<ConnectOrb> with TickerProviderStateMixin {
-  late final AnimationController _spin = AnimationController(vsync: this, duration: const Duration(seconds: 6))..repeat();
-  late final AnimationController _pulse = AnimationController(vsync: this, duration: const Duration(milliseconds: 2400))..repeat();
-  bool _down = false;
-
-  @override
-  void dispose() {
-    _spin.dispose();
-    _pulse.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final st = StoreScope.of(context);
-    final s = st.settings;
-    final on = st.state == ConnState.connected;
-    final busy = st.state == ConnState.connecting || st.state == ConnState.disconnecting;
-    final calm = s.reduceMotion;
-    final colors = ringColors(s);
-    final glow = s.isGoogle ? googleBlue : s.accent;
-
-    return GestureDetector(
-      onTapDown: (_) => setState(() => _down = true),
-      onTapCancel: () => setState(() => _down = false),
-      onTapUp: (_) => setState(() => _down = false),
-      onTap: () {
-        if (s.haptics) HapticFeedback.mediumImpact();
-        st.toggle();
-      },
-      child: AnimatedScale(
-        scale: _down ? 0.95 : 1,
-        duration: const Duration(milliseconds: 140),
-        curve: Curves.easeOut,
-        child: SizedBox(
-          width: 260, height: 260,
-          child: AnimatedBuilder(
-            animation: Listenable.merge([_spin, _pulse]),
-            builder: (context, _) {
-              final speed = busy ? 4.0 : (on ? 1.0 : 0.0);
-              final angle = calm ? 0.0 : _spin.value * 2 * math.pi * (speed == 0 ? 0.15 : speed);
-              return Stack(alignment: Alignment.center, children: [
-                if (on && !calm)
-                  for (final o in [0.0, 0.5])
-                    Builder(builder: (_) {
-                      final t = (_pulse.value + o) % 1;
-                      return Opacity(
-                        opacity: (1 - t) * 0.35,
-                        child: Container(
-                          width: 190 + 70 * t, height: 190 + 70 * t,
-                          decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: glow, width: 2)),
-                        ),
-                      );
-                    }),
-                AnimatedContainer(
-                  duration: const Duration(milliseconds: 500),
-                  width: 206, height: 206,
-                  decoration: BoxDecoration(shape: BoxShape.circle, boxShadow: [
-                    BoxShadow(color: glow.withValues(alpha: on ? 0.38 : 0.12), blurRadius: on ? 56 : 30, spreadRadius: on ? 4 : 0),
-                  ]),
-                ),
-                SweepRing(angle: angle, size: 206, stroke: 6, colors: colors, opacity: on || busy ? 1 : 0.55),
-                Container(
-                  width: 176, height: 176,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: RadialGradient(colors: [surfaceHigh, surface], center: const Alignment(-0.3, -0.4)),
-                    border: Border.all(color: outline),
-                  ),
-                  child: AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 280),
-                    transitionBuilder: (c, a) => ScaleTransition(scale: a, child: FadeTransition(opacity: a, child: c)),
-                    child: busy
-                        ? SizedBox(key: const ValueKey('busy'), width: 44, height: 44,
-                            child: CircularProgressIndicator(strokeWidth: 3, color: s.accent))
-                        : Icon(Icons.power_settings_new_rounded, key: ValueKey(on), size: 68, color: on ? s.accent : textMuted),
-                  ),
-                ),
-              ]);
-            },
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _ProfileCard extends StatelessWidget {
-  const _ProfileCard({required this.profile, required this.onTap});
-  final Profile? profile;
-  final VoidCallback onTap;
-  @override
-  Widget build(BuildContext context) {
-    final t = Theme.of(context);
-    return Card(
-      child: InkWell(
-        borderRadius: BorderRadius.circular(22),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Row(children: [
-            Container(
-              width: 44, height: 44,
-              decoration: BoxDecoration(color: t.colorScheme.primary.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(14)),
-              child: Icon(Icons.vpn_key_rounded, color: t.colorScheme.primary),
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(profile?.name ?? 'No config yet', style: t.textTheme.titleMedium, maxLines: 1, overflow: TextOverflow.ellipsis),
-                const SizedBox(height: 2),
-                Text(profile == null ? 'Open Configs to add one' : '${profile!.protocol.toUpperCase()} · ${profile!.server}',
-                    style: t.textTheme.bodySmall, maxLines: 1, overflow: TextOverflow.ellipsis),
-              ]),
-            ),
-            if (profile?.pingMs != null) Text(profile!.pingMs! < 0 ? 'timeout' : '${profile!.pingMs} ms', style: mono(12, color: textMuted)),
-            const Icon(Icons.chevron_right_rounded, color: textMuted),
-          ]),
-        ),
-      ),
-    );
-  }
-}
-
-class _Stat extends StatelessWidget {
-  const _Stat({required this.icon, required this.label, required this.value, required this.total, required this.color});
-  final IconData icon;
-  final String label;
-  final double value;
-  final int total;
-  final Color color;
-  @override
-  Widget build(BuildContext context) {
-    final t = Theme.of(context).textTheme;
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            Icon(icon, size: 18, color: color),
-            const SizedBox(width: 6),
-            Text(label, style: t.labelMedium),
-          ]),
-          const SizedBox(height: 10),
-          TweenAnimationBuilder<double>(
-            tween: Tween(end: value),
-            duration: const Duration(milliseconds: 600),
-            curve: Curves.easeOutCubic,
-            builder: (_, v, __) => Text('${fmtBytes(v)}/s', style: serif(24)),
-          ),
-          const SizedBox(height: 2),
-          Text('${fmtBytes(total)} total', style: t.bodySmall),
-        ]),
-      ),
-    );
-  }
-}
-
+/// Session time, counting up once a second while connected.
 class _Uptime extends StatefulWidget {
-  const _Uptime({required this.since});
+  const _Uptime({required this.since, required this.color});
   final DateTime? since;
+  final Color color;
   @override
   State<_Uptime> createState() => _UptimeState();
 }
@@ -302,17 +255,7 @@ class _UptimeState extends State<_Uptime> {
   Widget build(BuildContext context) {
     final d = widget.since == null ? Duration.zero : DateTime.now().difference(widget.since!);
     String two(int n) => n.toString().padLeft(2, '0');
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-        child: Row(children: [
-          const Icon(Icons.timer_outlined, size: 20, color: textMuted),
-          const SizedBox(width: 10),
-          Text('Session time', style: Theme.of(context).textTheme.labelMedium),
-          const Spacer(),
-          Text('${two(d.inHours)}:${two(d.inMinutes % 60)}:${two(d.inSeconds % 60)}', style: mono(16, color: textPrimary)),
-        ]),
-      ),
-    );
+    return Text('${two(d.inHours)}:${two(d.inMinutes % 60)}:${two(d.inSeconds % 60)}',
+        style: mono(16, color: widget.color).copyWith(fontWeight: FontWeight.w600));
   }
 }

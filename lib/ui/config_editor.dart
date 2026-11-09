@@ -122,7 +122,7 @@ String _label(List<_Opt> opts, String v) {
   return v;
 }
 
-String _mask(String v) => v.isEmpty ? '\u2022' * (v.length > 12 ? 12 : v.length) : '';
+String _mask(String v) => v.isEmpty ? '' : '\u2022' * (v.length > 12 ? 12 : v.length);
 
 // ---- what each protocol uses -----------------------------------------------------
 // The editor keeps the config clean: when the protocol changes, every setting

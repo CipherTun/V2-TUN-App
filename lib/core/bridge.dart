@@ -29,12 +29,10 @@ class Bridge {
         'config': json, 'field': field, 'values': values, 'target': target, 'jobs': jobs, 'seconds': seconds,
       }))!;
   static Future<String> payloadPreview(String json) async => (await _m.invokeMethod<String>('payloadPreview', {'config': json}))!;
-  static Future<String> previewPayload(String template, String host, int port) async =>
-      (await _m.invokeMethod<String>('previewPayload', {'template': template, 'host': host, 'port': port}))!;
+  static Future<String> previewPayload(String template, String host, String server, int port) async =>
+      (await _m.invokeMethod<String>('previewPayload', {'template': template, 'host': host, 'server': server, 'port': port}))!;
   static Future<String> validatePayload(String template) async =>
       (await _m.invokeMethod<String>('validatePayload', {'template': template})) ?? '';
-  static Future<List<String>> payloadPresets() async =>
-      ((await _m.invokeMethod<String>('payloadPresets')) ?? '').split('\n').where((e) => e.isNotEmpty).toList();
   static Future<String> explainRoute(String network, String addr, String protocol) async =>
       (await _m.invokeMethod<String>('explainRoute', {'network': network, 'addr': addr, 'protocol': protocol}))!;
   static Future<void> updateRouting(String routingJson) => _m.invokeMethod('updateRouting', {'routing': routingJson});

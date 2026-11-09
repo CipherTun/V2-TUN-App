@@ -99,11 +99,10 @@ class MainActivity : FlutterActivity() {
                 Mobile.scanHosts(s("config"), s("field"), s("values"), s("target"), n("jobs"), n("seconds"))
             }
             "payloadPreview" -> background(result) { Mobile.payloadPreview(s("config")) }
-            "previewPayload" -> background(result) { Mobile.previewPayload(s("template"), s("host"), n("port")) }
+            "previewPayload" -> background(result) { Mobile.previewPayload(s("template"), s("host"), s("server"), n("port")) }
             "validatePayload" -> background(result) {
                 try { Mobile.validatePayload(s("template")); "" } catch (e: Exception) { e.message ?: "invalid" }
             }
-            "payloadPresets" -> background(result) { Mobile.payloadPresets() }
             "explainRoute" -> background(result) { Mobile.explainRoute(s("network"), s("addr"), s("protocol")) }
             "updateRouting" -> background(result) { Mobile.updateRouting(s("routing")); null }
             "setRouteList" -> background(result) { Mobile.setRouteList(s("name"), s("items")); null }

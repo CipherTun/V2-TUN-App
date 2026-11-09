@@ -196,23 +196,18 @@ class _PayloadTool extends StatefulWidget {
 }
 
 class _PayloadToolState extends State<_PayloadTool> {
-  final _tpl = TextEditingController(text: '@ssh-ws');
-  final _host = TextEditingController(text: 'example.com');
-  List<String> _presets = [];
+  final _tpl = TextEditingController(
+      text: 'CONNECT [server_host_port] [protocol][crlf]Host: [host][crlf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]');
+  final _host = TextEditingController(text: 'bug.example.com');
+  final _server = TextEditingController(text: 'ssh.example.com');
   String? _res;
   bool _err = false;
-
-  @override
-  void initState() {
-    super.initState();
-    Bridge.payloadPresets().then((v) => mounted ? setState(() => _presets = v) : null);
-  }
 
   Future<void> _preview() async {
     try {
       final bad = await Bridge.validatePayload(_tpl.text);
       if (bad.isNotEmpty) throw bad;
-      _res = await Bridge.previewPayload(_tpl.text, _host.text, 443);
+      _res = await Bridge.previewPayload(_tpl.text, _host.text, _server.text, 443);
       _err = false;
     } catch (e) {
       _res = e.toString();
@@ -224,13 +219,11 @@ class _PayloadToolState extends State<_PayloadTool> {
   @override
   Widget build(BuildContext context) {
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Wrap(spacing: 8, runSpacing: 4, children: [
-        for (final p in _presets) ActionChip(label: Text(p, style: mono(12)), onPressed: () { _tpl.text = p; _preview(); }),
-      ]),
-      const SizedBox(height: 12),
       TextField(controller: _tpl, minLines: 3, maxLines: 8, style: mono(12.5), decoration: const InputDecoration(labelText: 'Template')),
       const SizedBox(height: 10),
-      TextField(controller: _host, decoration: const InputDecoration(labelText: 'Host')),
+      TextField(controller: _host, decoration: const InputDecoration(labelText: 'Host (bug host, [host])')),
+      const SizedBox(height: 10),
+      TextField(controller: _server, decoration: const InputDecoration(labelText: 'Server ([server])')),
       const SizedBox(height: 14),
       Row(children: [
         Expanded(child: FilledButton(onPressed: _preview, child: const Text('Preview'))),

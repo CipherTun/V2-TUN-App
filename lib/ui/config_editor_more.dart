@@ -322,8 +322,9 @@ extension _EditorMore on _ConfigEditorScreenState {
 }
 
 /// Editor for the HTTP payload (HTTP-Injector style): template, host, stage
-/// and remote proxy. Response checks (expectCodes, responseMap ...) stay in
-/// the config untouched and are edited as JSON.
+/// and remote proxy. There are no presets: the payload is what the user types.
+/// The server's reply is checked automatically (anything below 400 passes);
+/// there is nothing to configure for it.
 class _PayloadPage extends StatefulWidget {
   const _PayloadPage({
     required this.initial,
@@ -364,7 +365,7 @@ class _PayloadPageState extends State<_PayloadPage> {
     final v = await _textDialog(
       context,
       title: 'Payload template',
-      hint: 'Sent right after the connection is made. Tags such as [host] and [crlf] are filled in. A preset name starts with @.',
+      hint: 'Sent right after the connection is made. Tags such as [host], [crlf], [server] and [server_port] are filled in.',
       initial: _s('template'),
       maxLines: 8,
       trim: false,
@@ -373,26 +374,11 @@ class _PayloadPageState extends State<_PayloadPage> {
     if (v != null) _put('template', v);
   }
 
-  Future<void> _pickPreset() async {
-    var names = <String>[];
-    try {
-      names = await Bridge.payloadPresets();
-    } catch (_) {}
-    if (!mounted) return;
-    if (names.isEmpty) {
-      _toast('No presets available');
-      return;
-    }
-    final opts = [for (final n in names) _Opt(n.startsWith('@') ? n : '@$n', n)];
-    final v = await _choiceDialog(context, 'Presets', opts, _s('template'));
-    if (v != null) _put('template', v);
-  }
-
   Future<void> _editHost() async {
     final v = await _textDialog(
       context,
       title: 'Host',
-      hint: 'Value for [host] and [host_port]. Empty uses the server host.',
+      hint: 'Bug host: value for [host] and [host_port]. Empty uses the server host. The real server stays available as [server], [server_port] and [server_host_port].',
       initial: _s('host'),
       monospace: true,
     );
@@ -415,7 +401,7 @@ class _PayloadPageState extends State<_PayloadPage> {
     final v = await _textDialog(
       context,
       title: 'Remote proxy',
-      hint: 'host:port. The connection goes to this proxy and the payload names the real server in [host_port]. Needs the Before TLS stage.',
+      hint: 'host:port. The connection goes to this proxy and the payload names the real server with [server_host_port]. Needs the Before TLS stage.',
       initial: _s('proxy'),
       monospace: true,
     );
@@ -435,7 +421,7 @@ class _PayloadPageState extends State<_PayloadPage> {
     }
     final host = _s('host').isNotEmpty ? _s('host') : widget.server;
     try {
-      final r = await Bridge.previewPayload(t, host, widget.port);
+      final r = await Bridge.previewPayload(t, host, widget.server, widget.port);
       if (!mounted) return;
       await showDialog<void>(
         context: context,
@@ -501,7 +487,6 @@ class _PayloadPageState extends State<_PayloadPage> {
         padding: EdgeInsets.only(bottom: MediaQuery.of(context).padding.bottom + 32),
         children: [
           _rowTile(context, 'Template', _s('template').replaceAll('\n', ' '), _editTemplate, monospace: true),
-          _rowTile(context, 'Presets', 'Pick a built-in template such as @ssh-ws', _pickPreset),
           const Divider(height: 1, thickness: 1, color: outline),
           _headerTile(context, 'Options'),
           _rowTile(context, 'Host', _s('host'), _editHost, monospace: true),

@@ -24,6 +24,8 @@ class AppStore extends ChangeNotifier {
   final List<LogLine> logs = [];
   int upBytes = 0, downBytes = 0;
   double upBps = 0, downBps = 0;
+  /// The last 48 download rates, one per second, for the dashboard chart.
+  final List<double> downHistory = List<double>.filled(48, 0, growable: true);
   DateTime? connectedAt;
   Timer? _reconnect;
   bool _userStopped = true;
@@ -33,19 +35,29 @@ class AppStore extends ChangeNotifier {
   /// How long one latency test waits when picking the fastest config.
   static const _pingTimeout = Duration(seconds: 8);
 
+  /// The scheme of a link that only V2-TUN reads and that keeps every setting of a config.
+  static const nativeScheme = 'v2tun://';
+
   static Future<AppStore> load() async {
     final p = await SharedPreferences.getInstance();
-    final s = Settings.fromMap(jsonDecode(p.getString('settings') ?? '{}'));
-    final profiles = ((jsonDecode(p.getString('profiles') ?? '[]')) as List)
+    final settingsMap = (jsonDecode(p.getString('settings') ?? '{}') as Map).cast<String, dynamic>();
+    final pass = await _readSecret(p, 'socksPass');
+    if (pass != null) settingsMap['socksPass'] = pass;
+    final s = Settings.fromMap(settingsMap);
+    final profiles = ((jsonDecode((await _readSecret(p, 'profiles')) ?? '[]')) as List)
         .map((e) => Profile.fromMap(e as Map<String, dynamic>))
         .toList();
-    final subs = ((jsonDecode(p.getString('subs') ?? '[]')) as List)
+    final subs = ((jsonDecode((await _readSecret(p, 'subs')) ?? '[]')) as List)
         .map((e) => Subscription.fromMap(e as Map<String, dynamic>))
         .toList();
     final st = AppStore._(p, s, profiles, p.getString('selected'), subs);
     st.lifetimeBytes = p.getInt('lifetime') ?? 0;
     st._day = p.getString('usageDay') ?? '';
     st.todayBytes = st._day == st._today() ? (p.getInt('usageToday') ?? 0) : 0;
+    // Moves anything an older version left in plain text into the encrypted store.
+    st.saveSettings();
+    st._saveSubs();
+    st._saveProfiles();
     st._listen();
     unawaited(st._sync());
     unawaited(st.refreshDueSubscriptions());
@@ -59,14 +71,52 @@ class AppStore extends ChangeNotifier {
     return profiles.isEmpty ? null : profiles.first;
   }
 
+  // ---- secret storage ----------------------------------------------------
+  // Configs hold passwords and keys, subscription URLs hold tokens, and the SOCKS listener has a
+  // password. They are kept in the Android Keystore backed vault, never in plain preferences.
+
+  /// The stored secret, from the vault or, for data an older version saved, from plain preferences.
+  static Future<String?> _readSecret(SharedPreferences p, String key) async {
+    try {
+      final v = await Bridge.vaultGet(key);
+      if (v != null) return v;
+    } catch (_) {}
+    return p.getString(key);
+  }
+
+  bool _vaultWarned = false;
+  Future<void> _writes = Future<void>.value();
+
+  /// Writes run one after another, so a slow older write can never land after a newer one.
+  void _queue(Future<void> Function() job) {
+    _writes = _writes.then((_) => job()).catchError((Object _) {});
+  }
+
+  Future<void> _writeSecret(String key, String value) async {
+    try {
+      await Bridge.vaultPut(key, value);
+      await _prefs.remove(key); // no plain copy may stay behind
+    } catch (e) {
+      await _prefs.setString(key, value);
+      if (!_vaultWarned) {
+        _vaultWarned = true;
+        log('W', 'Secure storage is unavailable ($e). Credentials are saved without encryption on this device.');
+      }
+    }
+  }
+
   // ---- persistence -------------------------------------------------------
   void saveSettings() {
-    _prefs.setString('settings', jsonEncode(settings.toMap()));
+    final m = settings.toMap()..remove('socksPass');
+    _prefs.setString('settings', jsonEncode(m));
+    final pass = settings.socksPass;
+    _queue(() => _writeSecret('socksPass', pass));
     notifyListeners();
   }
 
   void _saveProfiles() {
-    _prefs.setString('profiles', jsonEncode(profiles.map((e) => e.toMap()).toList()));
+    final data = jsonEncode(profiles.map((e) => e.toMap()).toList());
+    _queue(() => _writeSecret('profiles', data));
     if (selectedId != null) _prefs.setString('selected', selectedId!);
     notifyListeners();
   }
@@ -115,6 +165,35 @@ class AppStore extends ChangeNotifier {
     _saveProfiles();
   }
 
+  /// Removes configs that are exactly the same as an earlier one. Returns how many were removed.
+  int removeDuplicates() {
+    Object? canon(Object? v) {
+      if (v is Map) {
+        final keys = v.keys.map((e) => '$e').toList()..sort();
+        return {for (final k in keys) k: canon(v[k])};
+      }
+      if (v is List) return [for (final e in v) canon(e)];
+      return v;
+    }
+
+    final seen = <String>{};
+    final drop = <Profile>[];
+    for (final p in profiles) {
+      String key;
+      try {
+        key = jsonEncode(canon(jsonDecode(p.json)));
+      } catch (_) {
+        key = p.json;
+      }
+      if (!seen.add(key)) drop.add(p);
+    }
+    if (drop.isEmpty) return 0;
+    profiles.removeWhere(drop.contains);
+    if (!profiles.any((p) => p.id == selectedId)) selectedId = profiles.isEmpty ? null : profiles.first.id;
+    _saveProfiles();
+    return drop.length;
+  }
+
   void sortByPing() {
     int k(Profile p) => p.pingMs == null ? 1 << 30 : (p.pingMs! < 0 ? 1 << 29 : p.pingMs!);
     profiles.sort((a, b) => k(a).compareTo(k(b)));
@@ -147,9 +226,81 @@ class AppStore extends ChangeNotifier {
     return best;
   }
 
+  // ---- import and share ---------------------------------------------------
+  /// A link only V2-TUN reads: the whole config, with every setting, in one string.
+  static String encodeNativeLink(Profile p) {
+    final body = jsonEncode({'v': 1, 'name': p.name, 'config': jsonDecode(p.json)});
+    return nativeScheme + base64Url.encode(utf8.encode(body)).replaceAll('=', '');
+  }
+
+  /// The name and the config JSON inside a V2-TUN link. Throws when it is not one.
+  static (String, String) decodeNativeLink(String link) {
+    final body = link.trim().substring(nativeScheme.length);
+    final m = jsonDecode(utf8.decode(base64Url.decode(base64Url.normalize(body)))) as Map<String, dynamic>;
+    final cfg = m['config'];
+    if (cfg is! Map) throw 'not a V2-TUN link';
+    final name = (m['name'] as String?)?.trim() ?? '';
+    return (name.isEmpty ? 'Imported config' : name, jsonEncode(cfg));
+  }
+
+  /// The standard share link of a profile (vless://, vmess://, ...), or null when it has none.
+  Future<String?> standardLink(Profile p) async {
+    try {
+      return await Bridge.shareLink(p.json, p.name);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Imports what the text holds: share links (also V2-TUN links), or JSON configs, one per
+  /// line or one pretty-printed. Returns how many configs were added.
+  Future<int> importText(String raw) async {
+    final text = raw.trim();
+    var added = 0;
+    var handled = false;
+    // A whole JSON config (also over many lines) or a JSON list of configs.
+    if (text.startsWith('{') || text.startsWith('[')) {
+      try {
+        final v = jsonDecode(text);
+        for (final item in v is List ? v : [v]) {
+          if (item is! Map) continue;
+          final m = Map<String, dynamic>.from(item);
+          final name = (m.remove('name') as String?)?.trim();
+          addProfile(name?.isNotEmpty == true ? name! : 'Config ${profiles.length + 1}', jsonEncode(m));
+          added++;
+        }
+        handled = true;
+      } catch (_) {
+        // not one JSON value: fall back to one entry per line below
+      }
+    }
+    if (!handled) {
+      for (final token in text.split(RegExp(r'\s+')).where((e) => e.isNotEmpty)) {
+        try {
+          if (token.startsWith('{')) {
+            jsonDecode(token);
+            addProfile('Config ${profiles.length + 1}', token);
+          } else if (token.toLowerCase().startsWith(nativeScheme)) {
+            final (name, json) = decodeNativeLink(token);
+            addProfile(name, json);
+          } else {
+            final m = jsonDecode(await Bridge.parseLink(token)) as Map<String, dynamic>;
+            final name = (m.remove('name') as String?)?.trim();
+            addProfile(name?.isNotEmpty == true ? name! : 'Config ${profiles.length + 1}', jsonEncode(m));
+          }
+          added++;
+        } catch (e) {
+          log('W', 'Import skipped: $e');
+        }
+      }
+    }
+    return added;
+  }
+
   // ---- subscriptions ---------------------------------------------------------
   void _saveSubs() {
-    _prefs.setString('subs', jsonEncode(subs.map((e) => e.toMap()).toList()));
+    final data = jsonEncode(subs.map((e) => e.toMap()).toList());
+    _queue(() => _writeSecret('subs', data));
     notifyListeners();
   }
 
@@ -260,6 +411,7 @@ class AppStore extends ChangeNotifier {
   }
 
   // ---- backup ----------------------------------------------------------------
+  /// The backup file is plain JSON and holds every password and key: keep it somewhere private.
   String exportBackup() => jsonEncode({
         'v': 1,
         'settings': settings.toMap(),
@@ -273,8 +425,8 @@ class AppStore extends ChangeNotifier {
     profiles = ((m['profiles'] as List?) ?? []).map((e) => Profile.fromMap((e as Map).cast<String, dynamic>())).toList();
     subs = ((m['subs'] as List?) ?? []).map((e) => Subscription.fromMap((e as Map).cast<String, dynamic>())).toList();
     selectedId = profiles.isEmpty ? null : profiles.first.id;
-    _prefs.setString('settings', jsonEncode(settings.toMap()));
-    _prefs.setString('subs', jsonEncode(subs.map((e) => e.toMap()).toList()));
+    saveSettings();
+    _saveSubs();
     _saveProfiles();
   }
 
@@ -460,6 +612,7 @@ class AppStore extends ChangeNotifier {
             final wasConnected = connectedAt != null;
             connectedAt = null;
             upBps = downBps = 0;
+            downHistory.fillRange(0, downHistory.length, 0);
             if (e['error'] != null) {
               error = e['error'] as String;
               log('E', error!);
@@ -479,6 +632,9 @@ class AppStore extends ChangeNotifier {
           _addUsage((upBytes - _lastUp).clamp(0, 1 << 40).toInt() + (downBytes - _lastDown).clamp(0, 1 << 40).toInt());
           upBps = (upBytes - _lastUp).toDouble().clamp(0, double.infinity);
           downBps = (downBytes - _lastDown).toDouble().clamp(0, double.infinity);
+          downHistory
+            ..removeAt(0)
+            ..add(downBps);
           _lastUp = upBytes;
           _lastDown = downBytes;
           notifyListeners();

@@ -17,6 +17,9 @@ class Bridge {
   static Future<bool> isRunning() async => (await _m.invokeMethod<bool>('isRunning')) ?? false;
 
   static Future<String> parseLink(String link) async => (await _m.invokeMethod<String>('parseLink', {'link': link}))!;
+  /// The standard share link of a config. Throws when the config has none (SSH, a payload, ...).
+  static Future<String> shareLink(String configJson, String name) async =>
+      (await _m.invokeMethod<String>('shareLink', {'config': configJson, 'name': name}))!;
   static Future<String> validate(String json) async => (await _m.invokeMethod<String>('validate', {'config': json})) ?? '';
   static Future<int> ping(String json, String url) async => (await _m.invokeMethod<int>('ping', {'config': json, 'url': url})) ?? -1;
   static Future<String> speedTest(String json, int seconds) async =>
@@ -43,4 +46,12 @@ class Bridge {
       ((await _m.invokeMethod<List<dynamic>>('installedApps')) ?? []).cast<Map<dynamic, dynamic>>();
   static Future<void> openVpnSettings() => _m.invokeMethod('openVpnSettings');
   static Future<void> keepScreenOn(bool on) => _m.invokeMethod('keepScreenOn', {'on': on});
+
+  /// Opens the system share sheet with [text].
+  static Future<void> shareText(String text, {String title = 'Share'}) =>
+      _m.invokeMethod('shareText', {'text': text, 'title': title});
+
+  /// Encrypted storage backed by the Android Keystore. [vaultGet] gives null when nothing is stored.
+  static Future<void> vaultPut(String key, String value) => _m.invokeMethod('vaultPut', {'key': key, 'value': value});
+  static Future<String?> vaultGet(String key) => _m.invokeMethod<String>('vaultGet', {'key': key});
 }

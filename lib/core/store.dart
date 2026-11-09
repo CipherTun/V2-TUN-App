@@ -408,13 +408,16 @@ class AppStore extends ChangeNotifier {
             connectedAt = DateTime.now();
             _lastUp = _lastDown = 0;
           } else if (state == ConnState.disconnected) {
+            // Only a tunnel that was really connected has "dropped". A connect attempt that failed its
+            // traffic check must not start a reconnect loop.
+            final wasConnected = connectedAt != null;
             connectedAt = null;
             upBps = downBps = 0;
             if (e['error'] != null) {
               error = e['error'] as String;
               log('E', error!);
             }
-            if (!_userStopped && settings.reconnectOnDrop && selected != null) {
+            if (!_userStopped && wasConnected && settings.reconnectOnDrop && selected != null) {
               _reconnect?.cancel();
               _reconnect = Timer(Duration(seconds: settings.reconnectDelaySec), connect);
               log('W', 'Dropped. Reconnecting in ${settings.reconnectDelaySec}s');

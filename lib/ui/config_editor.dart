@@ -122,7 +122,66 @@ String _label(List<_Opt> opts, String v) {
   return v;
 }
 
-String _mask(String v) => v.isEmpty ? '' : '\u2022' * (v.length > 12 ? 12 : v.length);
+String _mask(String v) => v.isEmpty ? '\u2022' * (v.length > 12 ? 12 : v.length) : '';
+
+// ---- what each protocol uses -----------------------------------------------------
+// The editor keeps the config clean: when the protocol changes, every setting
+// the new protocol does not use is removed instead of being hidden.
+
+bool _isHysteria(String p) => p == 'hysteria' || p == 'hysteria2';
+
+/// Protocols that take a transport (WebSocket, HTTP/2, gRPC, XHTTP, QUIC, mKCP).
+/// SSH, SOCKS and the HTTP proxies run over TCP, optionally with TLS and a
+/// payload: the library's share links, presets and tests never put a transport
+/// under them, and Hysteria has its own QUIC.
+bool _hasTransport(String p) => p == 'vless' || p == 'vmess' || p == 'trojan' || p == 'shadowsocks';
+
+/// Top-level keys that belong to particular protocols.
+const _protocolKeys = <String>[
+  'uuid',
+  'flow',
+  'alterId',
+  'method',
+  'password',
+  'username',
+  'privateKey',
+  'passphrase',
+  'proxyHeaders',
+  'mux',
+  'hysteria',
+  'advanced',
+];
+
+const _transportKeys = <String>['network', 'ws', 'grpcService', 'grpcMulti', 'xhttpMode', 'xhttp', 'quic', 'kcp'];
+
+const _keyNames = <String, String>{
+  'uuid': 'user ID',
+  'flow': 'flow',
+  'alterId': 'alter ID',
+  'method': 'encryption method',
+  'password': 'password',
+  'username': 'username',
+  'privateKey': 'private key',
+  'passphrase': 'key passphrase',
+  'proxyHeaders': 'proxy headers',
+  'mux': 'Mux',
+  'hysteria': 'Hysteria settings',
+  'advanced': 'SSH settings',
+};
+
+/// The [_protocolKeys] that protocol [p] uses.
+Set<String> _keysFor(String p) => switch (p) {
+      'vless' => {'uuid', 'flow', 'mux'},
+      'vmess' => {'uuid', 'alterId', 'method', 'mux'},
+      'trojan' => {'password', 'mux'},
+      'shadowsocks' => {'method', 'password', 'mux'},
+      'ssh' => {'username', 'password', 'privateKey', 'passphrase', 'advanced'},
+      'socks5' => {'username', 'password'},
+      'socks4' => {'username'},
+      'http' || 'https' => {'username', 'password', 'proxyHeaders'},
+      'hysteria' || 'hysteria2' => {'password', 'hysteria'},
+      _ => <String>{},
+    };
 
 // ---- dialogs and row tiles shared by the editor and its sub pages --------------
 ShapeBorder get _dlgShape => RoundedRectangleBorder(borderRadius: BorderRadius.circular(24));
@@ -258,7 +317,8 @@ Widget _rowTile(BuildContext context, String label, String value, VoidCallback o
 
 /// Settings-style editor for one config: rows with the current value, a tap
 /// opens a picker or a text dialog. It edits a working copy of the config JSON
-/// and keeps every key it does not show (routing, backups, mux ...).
+/// and keeps every key it does not show (routing, backups ...), except the
+/// settings of another protocol or transport, which it removes on a switch.
 class ConfigEditorScreen extends StatefulWidget {
   const ConfigEditorScreen({super.key, this.profile});
 
@@ -353,6 +413,87 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
   }
 
   void _toast(String m) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
+
+  // ---- keeping the config clean -----------------------------------------------
+  /// What switching to protocol [v] would remove, as readable names.
+  List<String> _removedBy(String v) {
+    final keep = _keysFor(v);
+    final names = <String>{};
+    for (final k in _protocolKeys) {
+      if (!keep.contains(k) && !_empty(_m[k])) names.add(_keyNames[k]!);
+    }
+    if (!_hasTransport(v) && _transportKeys.any((k) => !_empty(_m[k]))) names.add('transport');
+    if (_isHysteria(v)) {
+      if (_m['reality'] is Map) names.add('REALITY');
+      if (!_empty(_m['payload'])) names.add('payload');
+      if (!_empty(_m['fragment'])) names.add('fragment');
+    }
+    return names.toList();
+  }
+
+  /// Removes every setting that protocol [v] does not use. Call inside setState.
+  void _prune(String v) {
+    final keep = _keysFor(v);
+    for (final k in _protocolKeys) {
+      if (!keep.contains(k)) _m.remove(k);
+    }
+    if (!_hasTransport(v)) {
+      for (final k in _transportKeys) {
+        _m.remove(k);
+      }
+    }
+    if (_isHysteria(v)) {
+      // Hysteria brings its own QUIC and TLS and only reads the name and the insecure flag.
+      for (final k in ['reality', 'payload', 'fragment']) {
+        _m.remove(k);
+      }
+      final tls = _m['tls'];
+      if (tls is Map) {
+        tls.removeWhere((k, _) => k != 'sni' && k != 'allowInsecure');
+        if (tls.isEmpty) _m.remove('tls');
+      }
+    }
+  }
+
+  /// Removes the settings of every transport except [v]. Call inside setState.
+  void _pruneTransport(String v) {
+    if (v != 'grpc') {
+      _m.remove('grpcService');
+      _m.remove('grpcMulti');
+    }
+    if (v != 'xhttp') {
+      _m.remove('xhttpMode');
+      _m.remove('xhttp');
+    }
+    if (v != 'quic') _m.remove('quic');
+    if (v != 'kcp') _m.remove('kcp');
+    final ws = _m['ws'];
+    if (ws is Map) {
+      if (v == 'tcp' || v == 'quic' || v == 'kcp') {
+        _m.remove('ws'); // host, path and headers only exist for the HTTP based transports
+      } else {
+        if (v != 'ws') {
+          ws.remove('maxEarlyData');
+          ws.remove('pingSec');
+        }
+        if (v == 'grpc') {
+          ws.remove('path'); // gRPC uses the host and the service name only
+          ws.remove('headers');
+        }
+        if (ws.isEmpty) _m.remove('ws');
+      }
+    }
+    if (v == 'quic') {
+      // the library rejects a pin or verify name with QUIC, and QUIC takes no fingerprint
+      final t = _m['tls'];
+      if (t is Map) {
+        t.remove('pinSha256');
+        t.remove('verifyName');
+        t.remove('fingerprint');
+        if (t.isEmpty) _m.remove('tls');
+      }
+    }
+  }
 
   // ---- dialogs (thin wrappers over the shared ones) ---------------------------
   Future<String?> _askText({
@@ -490,51 +631,27 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
     final cur = _canonProtocol(_str('protocol'));
     final v = await _askChoice('Protocol', _protocols, cur);
     if (v == null || v == cur) return;
-    final toHy = v == 'hysteria' || v == 'hysteria2';
-    if (toHy) {
-      final clears = <String>[
-        if (_m.containsKey('network') && _canonNetwork(_str('network')) != 'tcp') 'transport',
-        if (_m['reality'] is Map) 'REALITY',
-        if (_m['payload'] != null) 'payload',
-        if (_m['fragment'] != null) 'fragment',
-      ];
-      if (clears.isNotEmpty) {
-        final ok = await _confirm(
-          'Switch to Hysteria?',
-          'Hysteria brings its own QUIC and TLS, so these settings will be removed: ${clears.join(', ')}.',
-          yes: 'Continue',
-          no: 'Cancel',
-        );
-        if (!ok) return;
-      }
+    final removed = _removedBy(v);
+    if (removed.isNotEmpty) {
+      final name = _label(_protocols, v);
+      final ok = await _confirm(
+        'Switch to $name?',
+        '$name does not use these settings, so they will be removed: ${removed.join(', ')}.',
+        yes: 'Continue',
+        no: 'Cancel',
+      );
+      if (!ok) return;
     }
     if (!mounted) return;
     setState(() {
       _dirty = true;
       _m['protocol'] = v;
-      if (v != 'vless') _m.remove('flow');
-      // SOCKS4 only sends a user id; there is no password to keep.
-      if (v == 'socks4') _m.remove('password');
-      if (toHy) {
-        for (final k in ['network', 'reality', 'payload', 'fragment', 'flow']) {
-          _m.remove(k);
-        }
-        final tls = _m['tls'];
-        if (tls is Map) {
-          tls.remove('pinSha256');
-          tls.remove('verifyName');
-        }
-      }
+      _prune(v);
       final method = _str('method').toLowerCase();
       if (v == 'shadowsocks' && !_ssMethods.any((o) => o.value == method)) _m['method'] = 'aes-128-gcm';
       if (v == 'vmess' && !_vmessMethods.any((o) => o.value == method)) _m['method'] = 'auto';
-      if (v == 'https') {
-        // An https proxy needs a TLS layer in the dial chain, and neither QUIC
-        // nor mKCP has one.
-        final n = _canonNetwork(_str('network'));
-        if (n == 'quic' || n == 'kcp') _m.remove('network');
-        _objOf('tls')['enabled'] = true;
-      }
+      // An https proxy needs a TLS layer in the dial chain.
+      if (v == 'https') _objOf('tls')['enabled'] = true;
     });
   }
 
@@ -552,6 +669,7 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
     }
     var droppedFlow = false;
     var droppedTls = false;
+    var droppedOld = false;
     setState(() {
       _dirty = true;
       if (v == 'tcp') {
@@ -559,6 +677,9 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
       } else {
         _m['network'] = v;
       }
+      final before = jsonEncode(_m);
+      _pruneTransport(v);
+      droppedOld = before != jsonEncode(_m);
       if (v != 'tcp' && _str('flow').isNotEmpty) {
         _m.remove('flow');
         droppedFlow = true;
@@ -575,8 +696,12 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
         }
       }
     });
-    if (droppedFlow) _toast('Flow removed: XTLS Vision needs the TCP transport');
-    if (droppedTls) _toast('TLS turned off: mKCP does not use it');
+    final notes = <String>[
+      if (droppedOld) 'Settings of the previous transport were removed',
+      if (droppedFlow) 'Flow removed: XTLS Vision needs the TCP transport',
+      if (droppedTls) 'TLS turned off: mKCP does not use it',
+    ];
+    if (notes.isNotEmpty) _toast(notes.join('. '));
   }
 
   Future<void> _pickFlow() async {
@@ -597,6 +722,7 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
       _m['flow'] = v;
       if (_canonNetwork(_str('network')) != 'tcp') {
         _m.remove('network');
+        _pruneTransport('tcp');
         notes.add('Transport set to TCP, which XTLS Vision needs');
       }
     });
@@ -629,6 +755,7 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
         tls.remove('pinSha256');
         tls.remove('verifyName');
         if (v == 'reality') {
+          tls.remove('allowInsecure'); // REALITY does its own verification
           final r = _objOf('reality');
           if ((r['serverName'] ?? '').toString().isEmpty && _gs('tls', 'sni').isNotEmpty) {
             r['serverName'] = tls['sni'];
@@ -955,7 +1082,10 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
   Widget build(BuildContext context) {
     final proto = _canonProtocol(_str('protocol'));
     final net = _canonNetwork(_str('network'));
-    final hy = proto == 'hysteria' || proto == 'hysteria2';
+    final hy = _isHysteria(proto);
+    // SSH, SOCKS and HTTP proxies have no transport. A config that already has
+    // one (imported JSON) still shows it, so nothing active is ever hidden.
+    final showTransport = _hasTransport(proto) || net != 'tcp';
 
     final children = <Widget>[
       _row('Name', _name, _editName),
@@ -972,10 +1102,12 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
         ..add(_header('Hysteria'))
         ..addAll(_hysteriaRows(proto));
     } else {
-      children
-        ..add(_divider())
-        ..add(_header('Transport'))
-        ..addAll(_transportRows(net));
+      if (showTransport) {
+        children
+          ..add(_divider())
+          ..add(_header('Transport'))
+          ..addAll(_transportRows(net));
+      }
       if (net != 'kcp') {
         children
           ..add(_divider())

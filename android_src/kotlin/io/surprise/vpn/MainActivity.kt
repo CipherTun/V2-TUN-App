@@ -42,9 +42,13 @@ class MainActivity : FlutterActivity() {
                         .setAction(V2TunVpnService.ACTION_START)
                         .putExtra("config", call.argument<String>("config"))
                         .putExtra("opts", opts.toString())
-                    getSharedPreferences("v2tun", MODE_PRIVATE).edit()
-                        .putString("last_config", call.argument<String>("config"))
-                        .putString("last_opts", opts.toString()).apply()
+                    // The Quick Settings tile reconnects with these. They hold passwords and keys,
+                    // so they are stored encrypted, and the old plain copy is removed.
+                    runCatching {
+                        Vault.put(this, "last_config", call.argument<String>("config") ?: "")
+                        Vault.put(this, "last_opts", opts.toString())
+                    }
+                    getSharedPreferences("v2tun", MODE_PRIVATE).edit().remove("last_config").remove("last_opts").apply()
                     startForegroundService(i)
                     result.success(null)
                 }
@@ -64,6 +68,18 @@ class MainActivity : FlutterActivity() {
                     else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                     result.success(null)
                 }
+                "shareText" -> {
+                    val send = Intent(Intent.ACTION_SEND)
+                        .setType("text/plain")
+                        .putExtra(Intent.EXTRA_TEXT, call.argument<String>("text") ?: "")
+                    startActivity(Intent.createChooser(send, call.argument<String>("title") ?: "Share"))
+                    result.success(null)
+                }
+                "vaultPut" -> background(result) {
+                    Vault.put(this, call.argument<String>("key") ?: "", call.argument<String>("value") ?: "")
+                    null
+                }
+                "vaultGet" -> background(result) { Vault.get(this, call.argument<String>("key") ?: "") }
                 else -> library(call, result)
             }
         }
@@ -75,6 +91,7 @@ class MainActivity : FlutterActivity() {
         fun n(k: String) = (call.argument<Number>(k) ?: 0).toLong()
         when (call.method) {
             "parseLink" -> background(result) { Mobile.parseLink(s("link")) }
+            "shareLink" -> background(result) { Mobile.shareLink(s("config"), s("name")) }
             "validate" -> background(result) { Mobile.validate(s("config")) }
             "ping" -> background(result) { Mobile.ping(s("config"), s("url")) }
             "speedTest" -> background(result) { Mobile.speedTest(s("config"), "", n("seconds")) }

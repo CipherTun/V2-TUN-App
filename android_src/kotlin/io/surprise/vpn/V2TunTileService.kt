@@ -35,8 +35,8 @@ class V2TunTileService : TileService() {
             startService(Intent(this, V2TunVpnService::class.java).setAction(V2TunVpnService.ACTION_STOP))
             return
         }
-        val prefs = getSharedPreferences("v2tun", Context.MODE_PRIVATE)
-        val cfg = prefs.getString("last_config", null)
+        // Saved encrypted by MainActivity when the app last connected.
+        val cfg = Vault.get(this, "last_config")?.takeIf { it.isNotEmpty() }
         // No saved config, or VPN permission missing: open the app instead.
         if (cfg == null || VpnService.prepare(this) != null) {
             val open = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -51,7 +51,7 @@ class V2TunTileService : TileService() {
             Intent(this, V2TunVpnService::class.java)
                 .setAction(V2TunVpnService.ACTION_START)
                 .putExtra("config", cfg)
-                .putExtra("opts", prefs.getString("last_opts", "{}"))
+                .putExtra("opts", Vault.get(this, "last_opts") ?: "{}")
         )
     }
 

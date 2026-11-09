@@ -95,8 +95,10 @@ class V2TunVpnService : VpnService() {
 
                 val p = b.establish() ?: throw IllegalStateException("The system refused to create the VPN interface")
                 pfd = p
-                Mobile.startTunEx(cfg, p.detachFd().toLong(), mtu.toLong(), dns, o.optBoolean("fakeDns"), o.optBoolean("sniff"))
-                pfd = null // the tunnel owns the descriptor now
+                // This service keeps ownership of the descriptor and closes it in closeInterface().
+                // Handing it over with detachFd() would leave nobody to close it, so the VPN interface
+                // (and the key icon in the status bar) would stay after disconnecting.
+                Mobile.startTunEx(cfg, p.fd.toLong(), mtu.toLong(), dns, o.optBoolean("fakeDns"), o.optBoolean("sniff"))
                 Hub.log("I", "TUN up, MTU $mtu, DNS $dns")
             }
             running = true
@@ -124,13 +126,18 @@ class V2TunVpnService : VpnService() {
         return j.toString()
     }
 
+    /** Closes the VPN interface. This is what removes the key icon; call it after the tunnel library has stopped. */
+    private fun closeInterface() {
+        runCatching { pfd?.close() }
+        pfd = null
+    }
+
     private fun shutdown(error: String?) {
         Hub.state("disconnecting")
         running = false
         ticker.removeCallbacks(tick)
         runCatching { if (mode == "socks") Mobile.stop() else Mobile.stopTun() }
-        runCatching { pfd?.close() }
-        pfd = null
+        closeInterface()
         Hub.state("disconnected", error)
         V2TunTileService.refresh(this)
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -147,6 +154,7 @@ class V2TunVpnService : VpnService() {
             runCatching { if (mode == "socks") Mobile.stop() else Mobile.stopTun() }
             Hub.state("disconnected")
         }
+        closeInterface()
         worker.shutdown()
         super.onDestroy()
     }

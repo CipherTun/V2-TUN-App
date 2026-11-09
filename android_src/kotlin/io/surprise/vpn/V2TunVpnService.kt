@@ -27,7 +27,9 @@ class V2TunVpnService : VpnService() {
     private var pfd: ParcelFileDescriptor? = null
     @Volatile private var mode = "tun"
     @Volatile private var running = false
-    @Volatile private var aborted = false   // the user asked to stop while connecting
+    // Every Start and every Stop takes a new number. A connect attempt that finds the number changed
+    // was cancelled (by a Stop or by a newer Start) and cleans up after itself.
+    @Volatile private var attempt = 0
     @Volatile private var session = 0       // changes on every connect and disconnect
     @Volatile private var badChecks = 0
     private var lastUp = 0L
@@ -63,24 +65,29 @@ class V2TunVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
-                aborted = true
+                val stop = ++attempt
                 // Close the tunnel right away so a connect or check that is in progress ends quickly.
                 closer.execute { runCatching { if (mode == "socks") Mobile.stop() else Mobile.stopTun() } }
-                worker.execute { shutdown(null) }
+                worker.execute { shutdown(null, stop) }
             }
             ACTION_START -> {
-                aborted = false
+                val a = ++attempt
                 startForegroundCompat()
                 val cfg = intent.getStringExtra("config") ?: ""
                 val opts = JSONObject(intent.getStringExtra("opts") ?: "{}")
-                worker.execute { bringUp(cfg, opts) }
+                worker.execute { bringUp(cfg, opts, a) }
             }
         }
         return START_NOT_STICKY
     }
 
-    private fun bringUp(configIn: String, o: JSONObject) {
-        if (running) shutdown(null)
+    private fun bringUp(configIn: String, o: JSONObject, a: Int) {
+        fun cancelled() = attempt != a
+        // Stopped or replaced before it began: the Stop or the newer Start takes over from here.
+        if (cancelled()) return
+        // A tunnel from an earlier connect is replaced, not announced as disconnected, and the
+        // service must stay alive for the new one.
+        if (running) teardown()
         Hub.state("connecting")
         mode = o.optString("mode", "tun")
         try {
@@ -129,8 +136,8 @@ class V2TunVpnService : VpnService() {
             // whether it works. Only a real request through it can say, and until then the state
             // stays "connecting".
             verifyTraffic()
-            if (aborted) {
-                shutdown(null)
+            if (cancelled()) {
+                teardown()
                 return
             }
             running = true
@@ -143,12 +150,13 @@ class V2TunVpnService : VpnService() {
             ticker.post(tick)
             ticker.postDelayed(healthTick, HEALTH_MS)
         } catch (e: Throwable) {
-            val msg = e.message ?: e.toString()
-            if (aborted) {
-                shutdown(null)
+            if (cancelled()) {
+                // The Stop, or the newer Start, that cancelled this attempt does the announcing.
+                teardown()
             } else {
+                val msg = e.message ?: e.toString()
                 Hub.log("E", msg)
-                shutdown(msg)
+                shutdown(msg, a)
             }
         }
     }
@@ -166,6 +174,7 @@ class V2TunVpnService : VpnService() {
 
     private fun checkHealth(s: Int) {
         if (!running || s != session) return
+        val at = attempt
         val failure = try {
             Mobile.checkTunnel(15L)
             null
@@ -181,12 +190,15 @@ class V2TunVpnService : VpnService() {
         Hub.log("W", "No traffic is passing through the tunnel ($badChecks/$MAX_BAD): $failure")
         if (badChecks >= MAX_BAD) {
             worker.execute {
-                if (running && s == session) shutdown("No traffic is passing through the tunnel: $failure")
+                if (running && s == session) shutdown("No traffic is passing through the tunnel: $failure", at)
             }
         }
     }
 
-    /** Replace a host name in "server" by its IP, keeping the name for SNI and WebSocket Host when unset. */
+    /**
+     * Replace a host name in "server" by its IP, keeping the name for SNI, WebSocket Host and the
+     * payload's [host] when they are unset.
+     */
     private fun resolveServer(cfg: String): String {
         val j = JSONObject(cfg)
         val host = j.optString("server")
@@ -194,6 +206,8 @@ class V2TunVpnService : VpnService() {
         val ip = InetAddress.getByName(host).hostAddress ?: return cfg
         j.optJSONObject("tls")?.let { if (it.optString("sni").isEmpty()) it.put("sni", host) }
         j.optJSONObject("ws")?.let { if (it.optString("host").isEmpty()) it.put("host", host) }
+        // Without this the payload's [host] (empty means the server) would turn into the IP.
+        j.optJSONObject("payload")?.let { if (it.optString("host").isEmpty()) it.put("host", host) }
         j.put("server", ip)
         Hub.log("I", "Resolved $host to $ip")
         return j.toString()
@@ -205,14 +219,24 @@ class V2TunVpnService : VpnService() {
         pfd = null
     }
 
-    private fun shutdown(error: String?) {
-        Hub.state("disconnecting")
+    /** Stops the tunnel and closes the VPN interface, without announcing anything or stopping the service. */
+    private fun teardown() {
         running = false
         session++
         ticker.removeCallbacks(tick)
         ticker.removeCallbacks(healthTick)
         runCatching { if (mode == "socks") Mobile.stop() else Mobile.stopTun() }
         closeInterface()
+    }
+
+    /**
+     * Disconnects and stops the service. [owner] is the attempt number this shutdown belongs to:
+     * when a newer Start has arrived since, the shutdown leaves everything to it.
+     */
+    private fun shutdown(error: String?, owner: Int = -1) {
+        if (owner >= 0 && attempt != owner) return
+        Hub.state("disconnecting")
+        teardown()
         Hub.state("disconnected", error)
         V2TunTileService.refresh(this)
         stopForeground(STOP_FOREGROUND_REMOVE)

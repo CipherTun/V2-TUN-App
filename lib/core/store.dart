@@ -27,7 +27,11 @@ class AppStore extends ChangeNotifier {
   DateTime? connectedAt;
   Timer? _reconnect;
   bool _userStopped = true;
+  int _connectGen = 0; // changes on every connect and disconnect, so a connect in progress can tell it was cancelled
   int _lastUp = 0, _lastDown = 0;
+
+  /// How long one latency test waits when picking the fastest config.
+  static const _pingTimeout = Duration(seconds: 8);
 
   static Future<AppStore> load() async {
     final p = await SharedPreferences.getInstance();
@@ -86,6 +90,13 @@ class AppStore extends ChangeNotifier {
     _saveProfiles();
   }
 
+  /// Puts a removed profile back at its old position (the undo of a swipe-delete).
+  void restoreProfile(Profile p, int index, {bool select = false}) {
+    profiles.insert(index.clamp(0, profiles.length).toInt(), p);
+    if (select) selectedId = p.id;
+    _saveProfiles();
+  }
+
   void select(Profile p) {
     selectedId = p.id;
     _saveProfiles();
@@ -110,17 +121,26 @@ class AppStore extends ChangeNotifier {
     _saveProfiles();
   }
 
-  /// Pings every config, then selects the quickest. Returns it, or null when none answered.
-  Future<Profile?> pickFastest() async {
+  /// Pings every config, then selects the quickest. Returns it, or null when none answered
+  /// (or [cancelled] said to stop). Each test is cut off after [_pingTimeout].
+  Future<Profile?> pickFastest({bool Function()? cancelled}) async {
     Profile? best;
     for (final p in List.of(profiles)) {
+      if (cancelled?.call() ?? false) {
+        _saveProfiles();
+        return null;
+      }
       try {
-        p.pingMs = await Bridge.ping(buildConfig(p), settings.pingUrl);
+        p.pingMs = await Bridge.ping(buildConfig(p), settings.pingUrl).timeout(_pingTimeout);
       } catch (_) {
         p.pingMs = -1;
       }
       if (p.pingMs! >= 0 && (best == null || p.pingMs! < best.pingMs!)) best = p;
       notifyListeners();
+    }
+    if (cancelled?.call() ?? false) {
+      _saveProfiles();
+      return null;
     }
     if (best != null) selectedId = best.id;
     _saveProfiles();
@@ -148,6 +168,16 @@ class AppStore extends ChangeNotifier {
     _saveProfiles();
   }
 
+  /// A profile id that stays the same for the same share link, so a refresh keeps the selection
+  /// and the latency of the servers that are still in the list (FNV-1a of the link).
+  String _linkId(String subId, String link) {
+    var h = 0x811c9dc5;
+    for (final c in link.codeUnits) {
+      h = ((h ^ c) * 0x01000193) & 0xFFFFFFFF;
+    }
+    return '$subId-${h.toRadixString(16)}';
+  }
+
   /// Downloads a subscription (plain or base64 list of share links) and replaces its configs.
   Future<int> refreshSubscription(Subscription sub) async {
     final c = HttpClient()..connectionTimeout = const Duration(seconds: 15);
@@ -161,15 +191,19 @@ class AppStore extends ChangeNotifier {
           body = utf8.decode(base64.decode(base64.normalize(body.replaceAll(RegExp(r'\s'), ''))));
         } catch (_) {}
       }
+      final oldPing = {for (final p in profiles) if (p.subId == sub.id) p.id: p.pingMs};
       final fresh = <Profile>[];
       for (final line in body.split(RegExp(r'\s+')).where((e) => e.contains('://'))) {
         try {
+          final id = _linkId(sub.id, line);
+          if (fresh.any((f) => f.id == id)) continue; // the same link twice
           final m = jsonDecode(await Bridge.parseLink(line)) as Map<String, dynamic>;
           final name = (m.remove('name') as String?)?.trim();
           fresh.add(Profile(
-              id: '${sub.id}-${fresh.length}',
+              id: id,
               name: name?.isNotEmpty == true ? name! : '${sub.name} ${fresh.length + 1}',
               json: jsonEncode(m),
+              pingMs: oldPing[id],
               subId: sub.id));
         } catch (e) {
           log('W', 'Subscription "${sub.name}": skipped a link ($e)');
@@ -244,15 +278,16 @@ class AppStore extends ChangeNotifier {
     _saveProfiles();
   }
 
-  /// Dials through the config's whole chain to check it really works, as Hiddify users asked for.
+  /// Measures the latency of the config that just connected and shows it on its row. The
+  /// service has already proved that traffic passes before it says "connected".
   Future<void> _healthCheck(Profile p, String cfg) async {
     if (!settings.connectionCheck) return;
     try {
       final ms = await Bridge.ping(cfg, settings.pingUrl);
-      log('I', 'Connection check passed (${ms} ms)');
+      log('I', 'Latency test passed (${ms} ms)');
       setPing(p, ms);
     } catch (e) {
-      log('W', 'Connection check failed: $e. The tunnel is up but this config may not be passing traffic');
+      log('W', 'Latency test failed: $e');
     }
   }
 
@@ -340,6 +375,9 @@ class AppStore extends ChangeNotifier {
       notifyListeners();
       return;
     }
+    _reconnect?.cancel();
+    final gen = ++_connectGen;
+    bool stale() => gen != _connectGen; // disconnect() or a newer connect() ran meanwhile
     _userStopped = false;
     error = null;
     state = ConnState.connecting;
@@ -347,20 +385,24 @@ class AppStore extends ChangeNotifier {
     try {
       if (settings.autoFastest && profiles.length > 1) {
         log('I', 'Picking the fastest config');
-        final f = await pickFastest();
+        final f = await pickFastest(cancelled: stale);
+        if (stale()) return;
         if (f != null) log('I', 'Fastest: "${f.name}" (${f.pingMs} ms)');
       }
       if (settings.mode == 'tun' && !await Bridge.prepareVpn()) {
         throw 'VPN permission was not granted';
       }
+      if (stale()) return;
       final p = selected!;
       final cfg = buildConfig(p);
       final bad = await Bridge.validate(cfg);
+      if (stale()) return;
       if (bad.isNotEmpty) throw bad;
       log('I', 'Connecting with "${p.name}" (${p.protocol}) in ${settings.mode} mode');
       await Bridge.start(cfg, nativeOptions());
       unawaited(_afterConnect(p, cfg));
     } catch (e) {
+      if (stale()) return;
       state = ConnState.disconnected;
       error = e.toString();
       log('E', error!);
@@ -368,8 +410,10 @@ class AppStore extends ChangeNotifier {
     }
   }
 
+  /// Waits for "connected" (the service first checks that traffic passes, up to 20 seconds)
+  /// and then measures the latency.
   Future<void> _afterConnect(Profile p, String cfg) async {
-    for (var i = 0; i < 20 && state != ConnState.connected; i++) {
+    for (var i = 0; i < 70 && state == ConnState.connecting; i++) {
       await Future<void>.delayed(const Duration(milliseconds: 500));
     }
     if (state == ConnState.connected) await _healthCheck(p, cfg);
@@ -377,6 +421,7 @@ class AppStore extends ChangeNotifier {
 
   Future<void> disconnect() async {
     _userStopped = true;
+    _connectGen++; // ends a connect that is still preparing
     _reconnect?.cancel();
     state = ConnState.disconnecting;
     notifyListeners();
@@ -407,6 +452,8 @@ class AppStore extends ChangeNotifier {
           if (state == ConnState.connected) {
             connectedAt = DateTime.now();
             _lastUp = _lastDown = 0;
+          } else if (state == ConnState.connecting) {
+            connectedAt = null; // a new attempt, so a failure of it is not a dropped tunnel
           } else if (state == ConnState.disconnected) {
             // Only a tunnel that was really connected has "dropped". A connect attempt that failed its
             // traffic check must not start a reconnect loop.

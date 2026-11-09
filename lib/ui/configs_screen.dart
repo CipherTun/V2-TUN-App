@@ -34,19 +34,39 @@ class _ConfigsScreenState extends State<ConfigsScreen> {
     final text = (await Clipboard.getData('text/plain'))?.text?.trim() ?? '';
     if (text.isEmpty) return _toast('Clipboard is empty');
     var added = 0;
-    for (final line in text.split(RegExp(r'\s+')).where((e) => e.isNotEmpty)) {
+    var handled = false;
+    // A whole JSON config (also pretty-printed over many lines) or a JSON list of configs.
+    if (text.startsWith('{') || text.startsWith('[')) {
       try {
-        if (line.startsWith('{')) {
-          jsonDecode(line);
-          st.addProfile('Config ${st.profiles.length + 1}', line);
-        } else {
-          final m = jsonDecode(await Bridge.parseLink(line)) as Map<String, dynamic>;
+        final v = jsonDecode(text);
+        final items = v is List ? v : [v];
+        for (final item in items) {
+          if (item is! Map) continue;
+          final m = Map<String, dynamic>.from(item);
           final name = (m.remove('name') as String?)?.trim();
           st.addProfile(name?.isNotEmpty == true ? name! : 'Config ${st.profiles.length + 1}', jsonEncode(m));
+          added++;
         }
-        added++;
-      } catch (e) {
-        st.log('W', 'Import skipped: $e');
+        handled = true;
+      } catch (_) {
+        // not one JSON value: fall back to one entry per line below
+      }
+    }
+    if (!handled) {
+      for (final line in text.split(RegExp(r'\s+')).where((e) => e.isNotEmpty)) {
+        try {
+          if (line.startsWith('{')) {
+            jsonDecode(line);
+            st.addProfile('Config ${st.profiles.length + 1}', line);
+          } else {
+            final m = jsonDecode(await Bridge.parseLink(line)) as Map<String, dynamic>;
+            final name = (m.remove('name') as String?)?.trim();
+            st.addProfile(name?.isNotEmpty == true ? name! : 'Config ${st.profiles.length + 1}', jsonEncode(m));
+          }
+          added++;
+        } catch (e) {
+          st.log('W', 'Import skipped: $e');
+        }
       }
     }
     _toast(added == 0 ? 'Nothing importable in the clipboard' : 'Imported $added config${added == 1 ? '' : 's'}');
@@ -212,7 +232,18 @@ class _ConfigsScreenState extends State<ConfigsScreen> {
                       decoration: BoxDecoration(color: googleRed.withValues(alpha: 0.2), borderRadius: BorderRadius.circular(22)),
                       child: const Icon(Icons.delete_rounded, color: googleRed),
                     ),
-                    onDismissed: (_) => st.removeProfile(p),
+                    onDismissed: (_) {
+                      final index = st.profiles.indexOf(p);
+                      final wasSelected = st.selected?.id == p.id;
+                      st.removeProfile(p);
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                        content: Text('Deleted "${p.name}"'),
+                        action: SnackBarAction(
+                          label: 'Undo',
+                          onPressed: () => st.restoreProfile(p, index, select: wasSelected),
+                        ),
+                      ));
+                    },
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 250),
                       decoration: BoxDecoration(

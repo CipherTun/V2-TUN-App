@@ -6,6 +6,8 @@ import '../core/bridge.dart';
 import '../core/models.dart';
 import '../core/store.dart';
 import 'config_editor.dart';
+import 'scan_screen.dart';
+import 'share_screen.dart';
 import 'theme.dart';
 
 class ConfigsScreen extends StatefulWidget {
@@ -33,43 +35,45 @@ class _ConfigsScreenState extends State<ConfigsScreen> {
   Future<void> _importClipboard(AppStore st) async {
     final text = (await Clipboard.getData('text/plain'))?.text?.trim() ?? '';
     if (text.isEmpty) return _toast('Clipboard is empty');
-    var added = 0;
-    var handled = false;
-    // A whole JSON config (also pretty-printed over many lines) or a JSON list of configs.
-    if (text.startsWith('{') || text.startsWith('[')) {
-      try {
-        final v = jsonDecode(text);
-        final items = v is List ? v : [v];
-        for (final item in items) {
-          if (item is! Map) continue;
-          final m = Map<String, dynamic>.from(item);
-          final name = (m.remove('name') as String?)?.trim();
-          st.addProfile(name?.isNotEmpty == true ? name! : 'Config ${st.profiles.length + 1}', jsonEncode(m));
-          added++;
-        }
-        handled = true;
-      } catch (_) {
-        // not one JSON value: fall back to one entry per line below
-      }
-    }
-    if (!handled) {
-      for (final line in text.split(RegExp(r'\s+')).where((e) => e.isNotEmpty)) {
-        try {
-          if (line.startsWith('{')) {
-            jsonDecode(line);
-            st.addProfile('Config ${st.profiles.length + 1}', line);
-          } else {
-            final m = jsonDecode(await Bridge.parseLink(line)) as Map<String, dynamic>;
-            final name = (m.remove('name') as String?)?.trim();
-            st.addProfile(name?.isNotEmpty == true ? name! : 'Config ${st.profiles.length + 1}', jsonEncode(m));
-          }
-          added++;
-        } catch (e) {
-          st.log('W', 'Import skipped: $e');
-        }
-      }
-    }
+    final added = await st.importText(text);
+    if (!mounted) return;
     _toast(added == 0 ? 'Nothing importable in the clipboard' : 'Imported $added config${added == 1 ? '' : 's'}');
+  }
+
+  /// Opens the camera; a scanned web address is offered as a subscription, anything else is imported.
+  Future<void> _scan(AppStore st) async {
+    final text = await Navigator.of(context).push<String>(MaterialPageRoute(builder: (_) => const ScanScreen()));
+    if (text == null || !mounted) return;
+    final t = text.trim();
+    final lower = t.toLowerCase();
+    if ((lower.startsWith('http://') || lower.startsWith('https://')) && !t.contains(RegExp(r'\s'))) {
+      final asSub = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Scanned a web address'),
+          content: Text(t, maxLines: 4, overflow: TextOverflow.ellipsis, style: mono(12, color: textMuted)),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('As a proxy')),
+            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('As a subscription')),
+          ],
+        ),
+      );
+      if (asSub == null || !mounted) return;
+      if (asSub) {
+        try {
+          final host = Uri.tryParse(t)?.host ?? '';
+          final n = await st.addSubscription(host.isEmpty ? 'Subscription ${st.subs.length + 1}' : host, t);
+          if (mounted) _toast('Added $n configs');
+        } catch (e) {
+          if (mounted) _toast('Could not read the subscription: $e');
+        }
+        return;
+      }
+    }
+    final added = await st.importText(t);
+    if (!mounted) return;
+    _toast(added == 0 ? 'The QR code holds nothing importable' : 'Imported $added config${added == 1 ? '' : 's'}');
   }
 
   bool _match(Profile p) => _q.isEmpty || p.name.toLowerCase().contains(_q) || p.server.toLowerCase().contains(_q);
@@ -104,6 +108,10 @@ class _ConfigsScreenState extends State<ConfigsScreen> {
 
   void _toast(String m) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
 
+  void _share(Profile p) => Navigator.of(context).push<void>(
+        MaterialPageRoute(builder: (_) => ShareScreen(title: p.name, profile: p)),
+      );
+
   @override
   Widget build(BuildContext context) {
     final st = StoreScope.of(context);
@@ -126,6 +134,8 @@ class _ConfigsScreenState extends State<ConfigsScreen> {
               switch (v) {
                 case 'clip':
                   await _importClipboard(st);
+                case 'scan':
+                  await _scan(st);
                 case 'sub':
                   await _addSub(context, st);
                 case 'manual':
@@ -135,6 +145,7 @@ class _ConfigsScreenState extends State<ConfigsScreen> {
               }
             },
             itemBuilder: (_) => const [
+              PopupMenuItem(value: 'scan', child: Text('Scan QR code')),
               PopupMenuItem(value: 'clip', child: Text('Import from clipboard')),
               PopupMenuItem(value: 'sub', child: Text('Add subscription URL')),
               PopupMenuItem(value: 'manual', child: Text('New config')),
@@ -155,6 +166,11 @@ class _ConfigsScreenState extends State<ConfigsScreen> {
                   }
                 case 'sort':
                   st.sortByPing();
+                case 'dupes':
+                  final n = st.removeDuplicates();
+                  _toast(n == 0 ? 'No duplicates found' : 'Removed $n duplicate${n == 1 ? '' : 's'}');
+                case 'shareall':
+                  await shareAllConfigs(context, st);
                 case 'refresh':
                   for (final sub in List.of(st.subs)) {
                     try {
@@ -163,12 +179,24 @@ class _ConfigsScreenState extends State<ConfigsScreen> {
                       _toast('${sub.name}: $e');
                     }
                   }
+                default:
+                  if (v.startsWith('sub:')) {
+                    final sub = st.subs.where((s) => s.id == v.substring(4)).firstOrNull;
+                    if (sub != null) {
+                      await Navigator.of(context).push<void>(
+                        MaterialPageRoute(builder: (_) => ShareScreen(title: sub.name, link: sub.url)),
+                      );
+                    }
+                  }
               }
             },
             itemBuilder: (_) => [
               const PopupMenuItem(value: 'fast', child: Text('Select fastest')),
               const PopupMenuItem(value: 'sort', child: Text('Sort by latency')),
+              if (st.profiles.length > 1) const PopupMenuItem(value: 'dupes', child: Text('Remove duplicates')),
+              if (st.profiles.isNotEmpty) const PopupMenuItem(value: 'shareall', child: Text('Share all configs')),
               if (st.subs.isNotEmpty) const PopupMenuItem(value: 'refresh', child: Text('Update subscriptions')),
+              for (final sub in st.subs) PopupMenuItem(value: 'sub:${sub.id}', child: Text('Share "${sub.name}"')),
             ],
           ),
         ]),
@@ -212,9 +240,13 @@ class _ConfigsScreenState extends State<ConfigsScreen> {
                   const SizedBox(height: 12),
                   Text('No configs yet', style: serif(22)),
                   const SizedBox(height: 4),
-                  Text('Copy a share link (vless, vmess, trojan, ss, ssh,\nsocks, http, hysteria) and tap import.', textAlign: TextAlign.center, style: Theme.of(context).textTheme.bodySmall),
+                  Text('Scan a QR code, or copy a share link (vless, vmess, trojan, ss, ssh,\nsocks, http, hysteria) and tap import.', textAlign: TextAlign.center, style: Theme.of(context).textTheme.bodySmall),
                   const SizedBox(height: 16),
-                  FilledButton.icon(onPressed: () => _importClipboard(st), icon: const Icon(Icons.content_paste_go_rounded), label: const Text('Import from clipboard')),
+                  Row(mainAxisSize: MainAxisSize.min, children: [
+                    FilledButton.icon(onPressed: () => _scan(st), icon: const Icon(Icons.qr_code_scanner_rounded), label: const Text('Scan QR')),
+                    const SizedBox(width: 10),
+                    OutlinedButton.icon(onPressed: () => _importClipboard(st), icon: const Icon(Icons.content_paste_go_rounded), label: const Text('Clipboard')),
+                  ]),
                 ]),
               )
             : ListView.separated(
@@ -229,7 +261,7 @@ class _ConfigsScreenState extends State<ConfigsScreen> {
                     direction: DismissDirection.endToStart,
                     background: Container(
                       alignment: Alignment.centerRight, padding: const EdgeInsets.only(right: 24),
-                      decoration: BoxDecoration(color: googleRed.withValues(alpha: 0.2), borderRadius: BorderRadius.circular(22)),
+                      decoration: BoxDecoration(color: googleRed.withValues(alpha: 0.2), borderRadius: BorderRadius.circular(24)),
                       child: const Icon(Icons.delete_rounded, color: googleRed),
                     ),
                     onDismissed: (_) {
@@ -247,12 +279,12 @@ class _ConfigsScreenState extends State<ConfigsScreen> {
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 250),
                       decoration: BoxDecoration(
-                        color: surface, borderRadius: BorderRadius.circular(22),
-                        border: Border.all(color: sel ? st.settings.accent : outline, width: sel ? 1.6 : 1),
+                        color: glass, borderRadius: BorderRadius.circular(24),
+                        border: Border.all(color: sel ? st.settings.accent : glassStroke, width: sel ? 1.6 : 1),
                       ),
                       child: ListTile(
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
-                        contentPadding: const EdgeInsets.fromLTRB(18, 6, 8, 6),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                        contentPadding: const EdgeInsets.fromLTRB(18, 6, 4, 6),
                         onTap: () => st.select(p),
                         title: Text(p.name, maxLines: 1, overflow: TextOverflow.ellipsis),
                         subtitle: Text('${p.protocol.toUpperCase()} \u00b7 ${p.server}', maxLines: 1, overflow: TextOverflow.ellipsis),
@@ -260,8 +292,9 @@ class _ConfigsScreenState extends State<ConfigsScreen> {
                           if (p.pingMs != null)
                             Text(p.pingMs! < 0 ? 'timeout' : '${p.pingMs} ms',
                                 style: mono(12, color: p.pingMs! < 0 ? googleRed : (p.pingMs! < 300 ? googleGreen : googleYellow))),
-                          IconButton(icon: const Icon(Icons.copy_all_outlined), tooltip: 'Duplicate', onPressed: () => st.duplicateProfile(p)),
-                          IconButton(icon: const Icon(Icons.edit_outlined), tooltip: 'Edit', onPressed: () => _editForm(context, st, p)),
+                          IconButton(visualDensity: VisualDensity.compact, icon: const Icon(Icons.ios_share_rounded), tooltip: 'Share', onPressed: () => _share(p)),
+                          IconButton(visualDensity: VisualDensity.compact, icon: const Icon(Icons.copy_all_outlined), tooltip: 'Duplicate', onPressed: () => st.duplicateProfile(p)),
+                          IconButton(visualDensity: VisualDensity.compact, icon: const Icon(Icons.edit_outlined), tooltip: 'Edit', onPressed: () => _editForm(context, st, p)),
                         ]),
                       ),
                     ),

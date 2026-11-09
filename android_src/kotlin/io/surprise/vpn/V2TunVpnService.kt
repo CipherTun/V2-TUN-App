@@ -20,10 +20,16 @@ import java.util.concurrent.Executors
 
 class V2TunVpnService : VpnService() {
     private val worker = Executors.newSingleThreadExecutor()
+    // Stopping must not wait behind a running connect or traffic check, so it has its own threads.
+    private val closer = Executors.newSingleThreadExecutor()
+    private val health = Executors.newSingleThreadExecutor()
     private val ticker = Handler(Looper.getMainLooper())
     private var pfd: ParcelFileDescriptor? = null
-    private var mode = "tun"
+    @Volatile private var mode = "tun"
     @Volatile private var running = false
+    @Volatile private var aborted = false   // the user asked to stop while connecting
+    @Volatile private var session = 0       // changes on every connect and disconnect
+    @Volatile private var badChecks = 0
     private var lastUp = 0L
     private var lastDown = 0L
     private var nm: NotificationManager? = null
@@ -42,10 +48,28 @@ class V2TunVpnService : VpnService() {
         }
     }
 
+    // While connected, a small real request goes through the tunnel every HEALTH_MS. When it fails
+    // MAX_BAD times in a row the tunnel is torn down, so the app never keeps saying "connected"
+    // while nothing passes.
+    private val healthTick = object : Runnable {
+        override fun run() {
+            if (!running) return
+            val s = session
+            health.execute { checkHealth(s) }
+            ticker.postDelayed(this, HEALTH_MS)
+        }
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_STOP -> worker.execute { shutdown(null) }
+            ACTION_STOP -> {
+                aborted = true
+                // Close the tunnel right away so a connect or check that is in progress ends quickly.
+                closer.execute { runCatching { if (mode == "socks") Mobile.stop() else Mobile.stopTun() } }
+                worker.execute { shutdown(null) }
+            }
             ACTION_START -> {
+                aborted = false
                 startForegroundCompat()
                 val cfg = intent.getStringExtra("config") ?: ""
                 val opts = JSONObject(intent.getStringExtra("opts") ?: "{}")
@@ -95,19 +119,70 @@ class V2TunVpnService : VpnService() {
 
                 val p = b.establish() ?: throw IllegalStateException("The system refused to create the VPN interface")
                 pfd = p
-                Mobile.startTunEx(cfg, p.detachFd().toLong(), mtu.toLong(), dns, o.optBoolean("fakeDns"), o.optBoolean("sniff"))
-                pfd = null // the tunnel owns the descriptor now
+                // This service keeps ownership of the descriptor and closes it in closeInterface().
+                // Handing it over with detachFd() would leave nobody to close it, so the VPN interface
+                // (and the key icon in the status bar) would stay after disconnecting.
+                Mobile.startTunEx(cfg, p.fd.toLong(), mtu.toLong(), dns, o.optBoolean("fakeDns"), o.optBoolean("sniff"))
                 Hub.log("I", "TUN up, MTU $mtu, DNS $dns")
+            }
+            // Starting the tunnel opens no connection to the server, so nothing is known yet about
+            // whether it works. Only a real request through it can say, and until then the state
+            // stays "connecting".
+            verifyTraffic()
+            if (aborted) {
+                shutdown(null)
+                return
             }
             running = true
             lastUp = 0L
             lastDown = 0L
+            session++
+            badChecks = 0
             Hub.state("connected")
             V2TunTileService.refresh(this)
             ticker.post(tick)
+            ticker.postDelayed(healthTick, HEALTH_MS)
         } catch (e: Throwable) {
-            Hub.log("E", e.message ?: e.toString())
-            shutdown(e.message ?: e.toString())
+            val msg = e.message ?: e.toString()
+            if (aborted) {
+                shutdown(null)
+            } else {
+                Hub.log("E", msg)
+                shutdown(msg)
+            }
+        }
+    }
+
+    /** Fetches a small page through the tunnel; throws with the reason when nothing passes. */
+    private fun verifyTraffic() {
+        Hub.log("I", "Checking that traffic passes through the tunnel")
+        try {
+            val ms = Mobile.checkTunnel(20L)
+            Hub.log("I", "Traffic check passed ($ms ms)")
+        } catch (e: Exception) {
+            throw IllegalStateException(e.message ?: "No traffic passes through the tunnel")
+        }
+    }
+
+    private fun checkHealth(s: Int) {
+        if (!running || s != session) return
+        val failure = try {
+            Mobile.checkTunnel(15L)
+            null
+        } catch (e: Exception) {
+            e.message ?: e.toString()
+        }
+        if (!running || s != session) return
+        if (failure == null) {
+            badChecks = 0
+            return
+        }
+        badChecks++
+        Hub.log("W", "No traffic is passing through the tunnel ($badChecks/$MAX_BAD): $failure")
+        if (badChecks >= MAX_BAD) {
+            worker.execute {
+                if (running && s == session) shutdown("No traffic is passing through the tunnel: $failure")
+            }
         }
     }
 
@@ -124,13 +199,20 @@ class V2TunVpnService : VpnService() {
         return j.toString()
     }
 
+    /** Closes the VPN interface. This is what removes the key icon; call it after the tunnel library has stopped. */
+    private fun closeInterface() {
+        runCatching { pfd?.close() }
+        pfd = null
+    }
+
     private fun shutdown(error: String?) {
         Hub.state("disconnecting")
         running = false
+        session++
         ticker.removeCallbacks(tick)
+        ticker.removeCallbacks(healthTick)
         runCatching { if (mode == "socks") Mobile.stop() else Mobile.stopTun() }
-        runCatching { pfd?.close() }
-        pfd = null
+        closeInterface()
         Hub.state("disconnected", error)
         V2TunTileService.refresh(this)
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -142,12 +224,17 @@ class V2TunVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        ticker.removeCallbacks(tick)
+        ticker.removeCallbacks(healthTick)
         if (running) {
             running = false
             runCatching { if (mode == "socks") Mobile.stop() else Mobile.stopTun() }
             Hub.state("disconnected")
         }
+        closeInterface()
         worker.shutdown()
+        closer.shutdown()
+        health.shutdown()
         super.onDestroy()
     }
 
@@ -173,7 +260,7 @@ class V2TunVpnService : VpnService() {
         )
         val n = Notification.Builder(this, CHANNEL)
             .setContentTitle("V2-TUN")
-            .setContentText("Tunnel is active")
+            .setContentText("Connecting…")
             .setSmallIcon(applicationInfo.icon)
             .setContentIntent(open)
             .setOngoing(true)
@@ -188,5 +275,7 @@ class V2TunVpnService : VpnService() {
         const val ACTION_START = "io.surprise.vpn.START"
         const val ACTION_STOP = "io.surprise.vpn.STOP"
         private const val CHANNEL = "tunnel"
+        private const val HEALTH_MS = 30_000L
+        private const val MAX_BAD = 2
     }
 }

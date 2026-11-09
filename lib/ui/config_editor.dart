@@ -131,14 +131,12 @@ String _mask(String v) => v.isEmpty ? '' : '\u2022' * (v.length > 12 ? 12 : v.le
 bool _isHysteria(String p) => p == 'hysteria' || p == 'hysteria2';
 
 /// Protocols that take a transport (WebSocket, HTTP/2, gRPC, XHTTP, QUIC, mKCP).
-/// SSH takes TCP, WebSocket or HTTP Upgrade (see [_sshNetworks]) so the chain
-/// WebSocket, remote proxy, payload, SSH can be built. SOCKS and the HTTP
-/// proxies run over TCP, optionally with TLS and a payload, and Hysteria has
-/// its own QUIC.
-bool _hasTransport(String p) => p == 'vless' || p == 'vmess' || p == 'trojan' || p == 'shadowsocks' || p == 'ssh';
-
-/// The transports SSH can run over.
-const _sshNetworks = <String>['tcp', 'ws', 'httpupgrade'];
+/// SSH has no transport settings: the library detects by itself whether a
+/// payload with "Upgrade: websocket" leads to a plain or a framed stream, so
+/// the editor shows no network type, host or path for it. SOCKS and the HTTP
+/// proxies run over a plain connection, optionally with TLS and a payload, and
+/// Hysteria has its own QUIC.
+bool _hasTransport(String p) => p == 'vless' || p == 'vmess' || p == 'trojan' || p == 'shadowsocks';
 
 /// Top-level keys that belong to particular protocols.
 const _protocolKeys = <String>[
@@ -343,6 +341,15 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
     super.initState();
     _name = widget.profile?.name ?? '';
     _m = _initial();
+    // SSH has no transport settings (the library detects WebSocket framing from
+    // the payload), so a WebSocket or HTTP Upgrade transport saved earlier is
+    // removed when the config is opened. Saving writes the cleaned config.
+    if (_canonProtocol(_str('protocol')) == 'ssh' && _transportKeys.any((k) => !_empty(_m[k]))) {
+      for (final k in _transportKeys) {
+        _m.remove(k);
+      }
+      _dirty = true;
+    }
   }
 
   Map<String, dynamic> _initial() {
@@ -421,9 +428,7 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
   // ---- keeping the config clean -----------------------------------------------
   /// Whether the current transport settings survive a switch to protocol [v].
   bool _keepsTransport(String v) {
-    if (!_hasTransport(v)) return false;
-    if (v == 'ssh') return _sshNetworks.contains(_canonNetwork(_str('network')));
-    return true;
+    return _hasTransport(v);
   }
 
   /// What switching to protocol [v] would remove, as readable names.
@@ -668,10 +673,7 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
 
   Future<void> _pickNetwork() async {
     final cur = _canonNetwork(_str('network'));
-    final opts = _canonProtocol(_str('protocol')) == 'ssh'
-        ? _networks.where((o) => _sshNetworks.contains(o.value)).toList()
-        : _networks;
-    final v = await _askChoice('Network type', opts, cur);
+    final v = await _askChoice('Network type', _networks, cur);
     if (v == null || v == cur) return;
     if ((v == 'quic' || v == 'kcp') && _m['reality'] is Map) {
       _toast("REALITY can't be combined with QUIC or mKCP");

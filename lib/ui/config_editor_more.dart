@@ -25,8 +25,11 @@ extension _EditorMore on _ConfigEditorScreenState {
     return n == 0 ? empty : '$n';
   }
 
-  Future<void> _editNum(String obj, String key, String title, {String? hint, int max = 1000000}) async {
-    final n = await _askInt(title, _intIn(obj, key), hint: hint, min: 0, max: max, allowEmpty: true);
+  /// Number row editor. Empty clears the value; a typed number must be between
+  /// [min] and [max], the range the library accepts without clamping it.
+  Future<void> _editNum(String obj, String key, String title,
+      {String? hint, int min = 0, int max = 1000000}) async {
+    final n = await _askInt(title, _intIn(obj, key), hint: hint, min: min, max: max, allowEmpty: true);
     if (n != null) _setIn(obj, key, n == 0 ? null : n);
   }
 
@@ -122,13 +125,19 @@ extension _EditorMore on _ConfigEditorScreenState {
         ),
       ];
 
-  List<Widget> _xhttpRows() => [
-        _row(
-          'Padding bytes',
-          _rangeShown('xhttp', 'xPaddingBytes', empty: 'Default (100-1000)'),
-          () => _editRange('xhttp', 'xPaddingBytes', 'Padding bytes',
-              hint: 'Random padding length as min-max. Empty uses 100-1000.'),
-        ),
+  List<Widget> _xhttpRows() {
+    // Auto behaves as packet-up. Only packet-up batches uploads into POSTs, so
+    // the POST size and interval do nothing in stream-up and stream-one.
+    final mode = _str('xhttpMode').toLowerCase();
+    final packetUp = mode.isEmpty || mode == 'auto' || mode == 'packet-up';
+    return [
+      _row(
+        'Padding bytes',
+        _rangeShown('xhttp', 'xPaddingBytes', empty: 'Default (100-1000)'),
+        () => _editRange('xhttp', 'xPaddingBytes', 'Padding bytes',
+            hint: 'Random padding length as min-max. Empty uses 100-1000.'),
+      ),
+      if (packetUp) ...[
         _row(
           'Max POST size (bytes)',
           _numShown('xhttp', 'scMaxEachPostBytes', empty: 'Default (1000000)'),
@@ -139,7 +148,9 @@ extension _EditorMore on _ConfigEditorScreenState {
           _numShown('xhttp', 'scMinPostsIntervalMs', empty: 'Default (30)'),
           () => _editNum('xhttp', 'scMinPostsIntervalMs', 'Min POST interval (ms)', hint: 'Empty uses 30.'),
         ),
-      ];
+      ],
+    ];
+  }
 
   List<Widget> _grpcRows() => [
         _switch(
@@ -171,6 +182,8 @@ extension _EditorMore on _ConfigEditorScreenState {
         ),
       ];
 
+  // The ranges below are the ones the library accepts; it clamps anything
+  // outside them without saying so.
   List<Widget> _kcpRows() => [
         _row(
           'Header type',
@@ -188,22 +201,25 @@ extension _EditorMore on _ConfigEditorScreenState {
         _row(
           'MTU',
           _numShown('kcp', 'mtu', empty: 'Default (1350)'),
-          () => _editNum('kcp', 'mtu', 'MTU', hint: 'Empty uses 1350.', max: 1500),
+          () => _editNum('kcp', 'mtu', 'MTU', hint: '576 to 1460. Empty uses 1350.', min: 576, max: 1460),
         ),
         _row(
           'TTI (ms)',
           _numShown('kcp', 'tti', empty: 'Default (50)'),
-          () => _editNum('kcp', 'tti', 'TTI (ms)', hint: 'Time between transmissions. Empty uses 50.', max: 1000),
+          () => _editNum('kcp', 'tti', 'TTI (ms)',
+              hint: 'Time between transmissions, 10 to 100. Empty uses 50.', min: 10, max: 100),
         ),
         _row(
           'Uplink capacity (MB/s)',
           _numShown('kcp', 'uplinkCapacity', empty: 'Default (5)'),
-          () => _editNum('kcp', 'uplinkCapacity', 'Uplink capacity (MB/s)', hint: 'Empty uses 5.'),
+          () => _editNum('kcp', 'uplinkCapacity', 'Uplink capacity (MB/s)',
+              hint: '1 to 1000. Empty uses 5.', min: 1, max: 1000),
         ),
         _row(
           'Downlink capacity (MB/s)',
           _numShown('kcp', 'downlinkCapacity', empty: 'Default (20)'),
-          () => _editNum('kcp', 'downlinkCapacity', 'Downlink capacity (MB/s)', hint: 'Empty uses 20.'),
+          () => _editNum('kcp', 'downlinkCapacity', 'Downlink capacity (MB/s)',
+              hint: '1 to 1000. Empty uses 20.', min: 1, max: 1000),
         ),
         _switch(
           'Congestion control',
@@ -214,12 +230,14 @@ extension _EditorMore on _ConfigEditorScreenState {
         _row(
           'Read buffer (MB)',
           _numShown('kcp', 'readBufferSize', empty: 'Default (2)'),
-          () => _editNum('kcp', 'readBufferSize', 'Read buffer (MB)', hint: 'Empty uses 2.'),
+          () => _editNum('kcp', 'readBufferSize', 'Read buffer (MB)',
+              hint: '1 to 256. Empty uses 2.', min: 1, max: 256),
         ),
         _row(
           'Write buffer (MB)',
           _numShown('kcp', 'writeBufferSize', empty: 'Default (2)'),
-          () => _editNum('kcp', 'writeBufferSize', 'Write buffer (MB)', hint: 'Empty uses 2.'),
+          () => _editNum('kcp', 'writeBufferSize', 'Write buffer (MB)',
+              hint: '1 to 256. Empty uses 2.', min: 1, max: 256),
         ),
       ];
 
@@ -237,7 +255,12 @@ extension _EditorMore on _ConfigEditorScreenState {
     final init = p is Map ? Map<String, dynamic>.from(p) : <String, dynamic>{};
     final res = await Navigator.of(context).push<Map<String, dynamic>>(
       MaterialPageRoute(
-        builder: (_) => _PayloadPage(initial: init, server: _str('server'), port: _intOf('port')),
+        builder: (_) => _PayloadPage(
+          initial: init,
+          server: _str('server'),
+          port: _intOf('port'),
+          tls: _security() != 'none',
+        ),
       ),
     );
     if (res == null || !mounted) return;
@@ -302,10 +325,19 @@ extension _EditorMore on _ConfigEditorScreenState {
 /// and remote proxy. Response checks (expectCodes, responseMap ...) stay in
 /// the config untouched and are edited as JSON.
 class _PayloadPage extends StatefulWidget {
-  const _PayloadPage({required this.initial, required this.server, required this.port});
+  const _PayloadPage({
+    required this.initial,
+    required this.server,
+    required this.port,
+    required this.tls,
+  });
   final Map<String, dynamic> initial;
   final String server;
   final int port;
+
+  /// Whether the config has a TLS or REALITY layer. Without one there is no
+  /// "after TLS" stage to choose.
+  final bool tls;
 
   @override
   State<_PayloadPage> createState() => _PayloadPageState();
@@ -370,7 +402,13 @@ class _PayloadPageState extends State<_PayloadPage> {
   Future<void> _pickStage() async {
     const opts = <_Opt>[_Opt('pre-tls', 'Before TLS'), _Opt('post-tls', 'After TLS')];
     final v = await _choiceDialog(context, 'Stage', opts, _s('stage').isEmpty ? 'pre-tls' : _s('stage'));
-    if (v != null) _put('stage', v == 'pre-tls' ? '' : v);
+    if (v == null) return;
+    if (v == 'post-tls' && _s('proxy').isNotEmpty) {
+      // a remote proxy only works before TLS
+      _p.remove('proxy');
+      _toast('Remote proxy removed: it needs the Before TLS stage');
+    }
+    _put('stage', v == 'pre-tls' ? '' : v);
   }
 
   Future<void> _editProxy() async {
@@ -430,12 +468,18 @@ class _PayloadPageState extends State<_PayloadPage> {
         if (!ok || !mounted) return;
       }
     }
-    Navigator.pop(context, Map<String, dynamic>.from(_p));
+    final out = Map<String, dynamic>.from(_p);
+    // No TLS layer: there is no "after TLS" stage to keep.
+    if (!widget.tls) out.remove('stage');
+    // The library rejects a remote proxy combined with the after-TLS stage.
+    if (out['stage'] == 'post-tls') out.remove('proxy');
+    Navigator.pop(context, out);
   }
 
   @override
   Widget build(BuildContext context) {
-    final stage = _s('stage') == 'post-tls' ? 'After TLS' : 'Before TLS';
+    final postTls = widget.tls && _s('stage') == 'post-tls';
+    final stage = postTls ? 'After TLS' : 'Before TLS';
     return Scaffold(
       appBar: AppBar(
         title: Text('HTTP payload', style: serif(22)),
@@ -461,8 +505,8 @@ class _PayloadPageState extends State<_PayloadPage> {
           const Divider(height: 1, thickness: 1, color: outline),
           _headerTile(context, 'Options'),
           _rowTile(context, 'Host', _s('host'), _editHost, monospace: true),
-          _rowTile(context, 'Stage', stage, _pickStage),
-          _rowTile(context, 'Remote proxy', _s('proxy'), _editProxy, monospace: true),
+          if (widget.tls) _rowTile(context, 'Stage', stage, _pickStage),
+          if (!postTls) _rowTile(context, 'Remote proxy', _s('proxy'), _editProxy, monospace: true),
         ],
       ),
     );

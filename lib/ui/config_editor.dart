@@ -513,6 +513,8 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
       _dirty = true;
       _m['protocol'] = v;
       if (v != 'vless') _m.remove('flow');
+      // SOCKS4 only sends a user id; there is no password to keep.
+      if (v == 'socks4') _m.remove('password');
       if (toHy) {
         for (final k in ['network', 'reality', 'payload', 'fragment', 'flow']) {
           _m.remove(k);
@@ -526,7 +528,13 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
       final method = _str('method').toLowerCase();
       if (v == 'shadowsocks' && !_ssMethods.any((o) => o.value == method)) _m['method'] = 'aes-128-gcm';
       if (v == 'vmess' && !_vmessMethods.any((o) => o.value == method)) _m['method'] = 'auto';
-      if (v == 'https') _objOf('tls')['enabled'] = true;
+      if (v == 'https') {
+        // An https proxy needs a TLS layer in the dial chain, and neither QUIC
+        // nor mKCP has one.
+        final n = _canonNetwork(_str('network'));
+        if (n == 'quic' || n == 'kcp') _m.remove('network');
+        _objOf('tls')['enabled'] = true;
+      }
     });
   }
 
@@ -536,6 +544,10 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
     if (v == null || v == cur) return;
     if ((v == 'quic' || v == 'kcp') && _m['reality'] is Map) {
       _toast("REALITY can't be combined with QUIC or mKCP");
+      return;
+    }
+    if ((v == 'quic' || v == 'kcp') && _canonProtocol(_str('protocol')) == 'https') {
+      _toast("An HTTPS proxy needs TLS, which QUIC and mKCP don't use");
       return;
     }
     var droppedFlow = false;
@@ -594,13 +606,17 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
 
   Future<void> _pickSecurity(String net) async {
     final cur = _security();
-    final v = await _askChoice('Security', _securities, cur);
+    // An https proxy needs TLS in the chain, so "None" is not offered for it.
+    final isHttps = _canonProtocol(_str('protocol')) == 'https';
+    final v = await _askChoice(
+        'Security', isHttps ? _securities.where((o) => o.value != 'none').toList() : _securities, cur);
     if (v == null || v == cur) return;
     if (v == 'reality' && net == 'quic') {
       _toast("REALITY can't be used with the QUIC transport");
       return;
     }
     var droppedFlow = false;
+    var droppedFragment = false;
     setState(() {
       _dirty = true;
       final tls = _objOf('tls');
@@ -619,6 +635,11 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
           }
         } else {
           _m.remove('reality');
+          // Fragment only splits a TLS ClientHello, and a payload stage of
+          // "after TLS" means nothing without TLS.
+          if (_m.remove('fragment') != null) droppedFragment = true;
+          final pl = _m['payload'];
+          if (pl is Map) pl.remove('stage');
           if (_str('flow').isNotEmpty) {
             _m.remove('flow');
             droppedFlow = true;
@@ -627,7 +648,11 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
       }
       if (tls.isEmpty) _m.remove('tls');
     });
-    if (droppedFlow) _toast('Flow removed: XTLS Vision needs TLS or REALITY');
+    final notes = <String>[
+      if (droppedFlow) 'Flow removed: XTLS Vision needs TLS or REALITY',
+      if (droppedFragment) 'Fragment removed: it only splits a TLS handshake',
+    ];
+    if (notes.isNotEmpty) _toast(notes.join('. '));
   }
 
   Future<void> _openJson() async {
@@ -774,8 +799,14 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
             monospace: true,
           ),
         ];
-      case 'socks5':
       case 'socks4':
+        // SOCKS4 has a user id and no password.
+        return [
+          _row('User ID', _str('username'),
+              () => _editTop('username', 'User ID', hint: 'Optional. SOCKS4 has no password.'),
+              monospace: true),
+        ];
+      case 'socks5':
       case 'http':
       case 'https':
         return [
@@ -896,10 +927,12 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
             () => _editList('tls', 'pinSha256', 'Certificate pin (SHA-256)',
                 hint: 'Hex SHA-256 of the server certificate. Separate several with commas.'),
             monospace: true),
-        _row('Verify name', _gs('tls', 'verifyName'),
-            () => _editIn('tls', 'verifyName', 'Verify name',
-                hint: 'Check the server certificate for this name instead of the SNI.'),
-            monospace: true),
+        // The library skips the name check when insecure certificates are allowed.
+        if (_get('tls', 'allowInsecure') != true)
+          _row('Verify name', _gs('tls', 'verifyName'),
+              () => _editIn('tls', 'verifyName', 'Verify name',
+                  hint: 'Check the server certificate for this name instead of the SNI.'),
+              monospace: true),
       ],
       if (sec == 'reality') ...[
         _row('Public key', _gs('reality', 'publicKey'),
@@ -953,10 +986,14 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
         children
           ..add(_divider())
           ..add(_header('Payload'))
-          ..addAll(_payloadRows())
-          ..add(_divider())
-          ..add(_header('Fragment'))
-          ..addAll(_fragmentRows());
+          ..addAll(_payloadRows());
+        // Fragment only splits a TLS ClientHello, so it needs TLS or REALITY.
+        if (_security() != 'none') {
+          children
+            ..add(_divider())
+            ..add(_header('Fragment'))
+            ..addAll(_fragmentRows());
+        }
       }
       if (_muxable(proto)) {
         children

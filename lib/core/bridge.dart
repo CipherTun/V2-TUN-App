@@ -28,6 +28,10 @@ class Bridge {
       (await _m.invokeMethod<String>('scanHosts', {
         'config': json, 'field': field, 'values': values, 'target': target, 'jobs': jobs, 'seconds': seconds,
       }))!;
+  /// Tests a config one layer at a time (DNS, TCP, payload and reply, TLS, SSH banner, a real request).
+  /// Returns JSON: {ok, summary, stages: [{name, ok, ms, detail, raw, error}]}.
+  static Future<String> diagnose(String json, int seconds) async =>
+      (await _m.invokeMethod<String>('diagnose', {'config': json, 'seconds': seconds}))!;
   static Future<String> payloadPreview(String json) async => (await _m.invokeMethod<String>('payloadPreview', {'config': json}))!;
   static Future<String> previewPayload(String template, String host, String server, int port) async =>
       (await _m.invokeMethod<String>('previewPayload', {'template': template, 'host': host, 'server': server, 'port': port}))!;

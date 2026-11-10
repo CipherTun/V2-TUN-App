@@ -6,6 +6,10 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.Handler
@@ -38,6 +42,19 @@ class V2TunVpnService : VpnService() {
     private var nm: NotificationManager? = null
     private var builder: Notification.Builder? = null
 
+    // Auto-reconnect: what the last Start asked for, so a lost tunnel can be brought up again.
+    @Volatile private var autoReconnect = true
+    @Volatile private var reconnects = 0
+    private var lastCfg = ""
+    private var lastOpts = JSONObject()
+    private val ipv4 = Regex("""\d+\.\d+\.\d+\.\d+""")
+
+    // Network change detection: when the phone moves to another network (Wi-Fi to mobile data and
+    // back) the tunnel's connection to the server is usually dead, so it is checked right away.
+    private var netCb: ConnectivityManager.NetworkCallback? = null
+    @Volatile private var lastNet: Network? = null
+    @Volatile private var netLost = false
+
     private val tick = object : Runnable {
         override fun run() {
             if (!running) return
@@ -52,8 +69,8 @@ class V2TunVpnService : VpnService() {
     }
 
     // While connected, a small real request goes through the tunnel every HEALTH_MS. When it fails
-    // MAX_BAD times in a row the tunnel is torn down, so the app never keeps saying "connected"
-    // while nothing passes.
+    // MAX_BAD times in a row the tunnel is brought up again (or torn down when auto-reconnect is off
+    // or has given up), so the app never keeps saying "connected" while nothing passes.
     private val healthTick = object : Runnable {
         override fun run() {
             if (!running) return
@@ -76,13 +93,16 @@ class V2TunVpnService : VpnService() {
                 startForegroundCompat()
                 val cfg = intent.getStringExtra("config") ?: ""
                 val opts = JSONObject(intent.getStringExtra("opts") ?: "{}")
+                lastCfg = cfg
+                lastOpts = opts
+                reconnects = 0
                 worker.execute { bringUp(cfg, opts, a) }
             }
         }
         return START_NOT_STICKY
     }
 
-    private fun bringUp(configIn: String, o: JSONObject, a: Int) {
+    private fun bringUp(configIn: String, o: JSONObject, a: Int, auto: Boolean = false) {
         fun cancelled() = attempt != a
         // Stopped or replaced before it began: the Stop or the newer Start takes over from here.
         if (cancelled()) return
@@ -91,6 +111,7 @@ class V2TunVpnService : VpnService() {
         if (running) teardown()
         Hub.state("connecting")
         mode = o.optString("mode", "tun")
+        autoReconnect = o.optBoolean("autoReconnect", true)
         try {
             if (mode == "socks") {
                 Mobile.startEx(configIn, o.optString("listen", "127.0.0.1:10808"), o.optString("user"), o.optString("pass"))
@@ -105,8 +126,13 @@ class V2TunVpnService : VpnService() {
                 // the tunnel library, goes to a public DNS server that is often unreachable on the
                 // networks these configs are made for, and the dial then times out on the lookup.
                 val cfg = resolveServer(configIn)
+                // "dns" may list several servers separated by commas or spaces. The VPN interface
+                // gets every IPv4 one (the tunnel carries IPv4 only) so the system can fall back to
+                // the next, and the library gets the first. tls:// entries are for the library's own
+                // resolver (directDns) and are skipped here.
                 val dns = o.optString("dns", "1.1.1.1:53")
-                val dnsIp = dns.substringBeforeLast(":")
+                val dnsList = dns.split(',', ' ', '\n').map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("tls://") }
+                val dnsMain = dnsList.firstOrNull() ?: "1.1.1.1:53"
                 val mtu = o.optInt("mtu", 1500)
 
                 val b = Builder()
@@ -114,8 +140,16 @@ class V2TunVpnService : VpnService() {
                     .setMtu(mtu)
                     .addAddress("172.19.0.1", 30)
                     .addRoute("0.0.0.0", 0)
-                    .addDnsServer(dnsIp)
                     .setMetered(o.optBoolean("metered", false))
+                var dnsAdded = 0
+                for (d in dnsList) {
+                    val h = dnsHost(d)
+                    if (ipv4.matches(h)) {
+                        b.addDnsServer(h)
+                        dnsAdded++
+                    }
+                }
+                if (dnsAdded == 0) b.addDnsServer("1.1.1.1")
                 // The tunnel carries IPv4 only. Sending ::/0 into the interface drops IPv6 instead of leaking it.
                 runCatching { b.addAddress("fdfe:dcba:9876::1", 126); b.addRoute("::", 0) }
                     .onFailure { Hub.log("W", "IPv6 blackhole route unavailable: ${it.message}") }
@@ -128,12 +162,16 @@ class V2TunVpnService : VpnService() {
                 }
                 if (appMode != "allow" && o.optBoolean("excludeSelf", true)) runCatching { b.addDisallowedApplication(packageName) }
 
+                // A reconnect keeps the old interface up while the tunnel is down, so apps get no
+                // connection instead of a direct one. The new interface replaces it, then it is closed.
+                val old = pfd
                 val p = b.establish() ?: throw IllegalStateException("The system refused to create the VPN interface")
                 pfd = p
+                runCatching { old?.close() }
                 // This service keeps ownership of the descriptor and closes it in closeInterface().
                 // Handing it over with detachFd() would leave nobody to close it, so the VPN interface
                 // (and the key icon in the status bar) would stay after disconnecting.
-                Mobile.startTunEx(cfg, p.fd.toLong(), mtu.toLong(), dns, o.optBoolean("fakeDns"), o.optBoolean("sniff"))
+                Mobile.startTunEx(cfg, p.fd.toLong(), mtu.toLong(), dnsMain, o.optBoolean("fakeDns"), o.optBoolean("sniff"))
                 Hub.log("I", "TUN up, MTU $mtu, DNS $dns")
             }
             // Starting the tunnel opens no connection to the server, so nothing is known yet about
@@ -149,10 +187,13 @@ class V2TunVpnService : VpnService() {
             lastDown = 0L
             session++
             badChecks = 0
+            reconnects = 0
+            if (auto) Hub.log("I", "Reconnected")
             Hub.state("connected")
             V2TunTileService.refresh(this)
             ticker.post(tick)
             ticker.postDelayed(healthTick, HEALTH_MS)
+            watchNetwork()
         } catch (e: Throwable) {
             if (cancelled()) {
                 // The Stop, or the newer Start, that cancelled this attempt does the announcing.
@@ -160,9 +201,37 @@ class V2TunVpnService : VpnService() {
             } else {
                 val msg = e.message ?: e.toString()
                 Hub.log("E", msg)
-                shutdown(msg, a)
+                // A first connect that fails is reported at once (a wrong config would otherwise
+                // loop); a reconnect that fails goes on to the next try.
+                if (auto) reconnect(msg, a) else shutdown(msg, a)
             }
         }
+    }
+
+    /**
+     * The tunnel stopped working. Stops it, keeps the VPN interface and tries again after a growing
+     * pause (3 s, 6 s, 12 s ... up to 60 s), at most MAX_RECONNECTS times, then disconnects with the
+     * reason. A Stop or a new Start during the pause cancels it. Runs on the worker thread.
+     */
+    private fun reconnect(why: String, owner: Int) {
+        if (attempt != owner) return
+        if (!autoReconnect || reconnects >= MAX_RECONNECTS) {
+            val note = if (reconnects > 0) "$why (gave up after $reconnects reconnect attempts)" else why
+            shutdown(note, owner)
+            return
+        }
+        reconnects++
+        val wait = minOf(RECONNECT_BASE_MS shl (reconnects - 1), RECONNECT_MAX_MS)
+        Hub.log("W", "$why. Reconnecting in ${wait / 1000} s (attempt $reconnects of $MAX_RECONNECTS)")
+        running = false
+        session++
+        ticker.removeCallbacks(tick)
+        ticker.removeCallbacks(healthTick)
+        runCatching { if (mode == "socks") Mobile.stop() else Mobile.stopTun() }
+        Hub.state("connecting")
+        updateNotification("Reconnecting…")
+        val next = ++attempt
+        ticker.postDelayed({ worker.execute { bringUp(lastCfg, lastOpts, next, true) } }, wait)
     }
 
     /** Fetches a small page through the tunnel; throws with the reason when nothing passes. */
@@ -194,9 +263,56 @@ class V2TunVpnService : VpnService() {
         Hub.log("W", "No traffic is passing through the tunnel ($badChecks/$MAX_BAD): $failure")
         if (badChecks >= MAX_BAD) {
             worker.execute {
-                if (running && s == session) shutdown("No traffic is passing through the tunnel: $failure", at)
+                if (running && s == session) reconnect("No traffic is passing through the tunnel: $failure", at)
             }
         }
+    }
+
+    /** Starts watching the real networks; a change triggers a quick check (see [recheckSoon]). */
+    private fun watchNetwork() {
+        if (netCb != null) return
+        runCatching {
+            val cm = getSystemService(ConnectivityManager::class.java)
+            val req = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                .build()
+            lastNet = null
+            netLost = false
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    val changed = (lastNet != null && lastNet != network) || netLost
+                    lastNet = network
+                    netLost = false
+                    if (changed && running) {
+                        Hub.log("I", "The network changed, checking the tunnel")
+                        recheckSoon()
+                    }
+                }
+
+                override fun onLost(network: Network) {
+                    if (network == lastNet) netLost = true
+                }
+            }
+            cm.registerNetworkCallback(req, cb)
+            netCb = cb
+        }.onFailure { Hub.log("W", "Network change detection is unavailable: ${it.message}") }
+    }
+
+    private fun unwatchNetwork() {
+        val cb = netCb ?: return
+        netCb = null
+        runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(cb) }
+    }
+
+    /**
+     * After a network change one failed check is enough to reconnect (instead of MAX_BAD in a row),
+     * and it runs after a short pause so the new network can settle.
+     */
+    private fun recheckSoon() {
+        val s = session
+        badChecks = MAX_BAD - 1
+        ticker.postDelayed({ health.execute { checkHealth(s) } }, 2500)
     }
 
     /**
@@ -241,6 +357,13 @@ class V2TunVpnService : VpnService() {
 
     private fun isIpLiteral(h: String) = h.contains(':') || h.matches(Regex("""\d+\.\d+\.\d+\.\d+"""))
 
+    /** The host of a DNS entry: "1.1.1.1:53" gives "1.1.1.1", "[::1]:53" gives "::1", a bare address stays. */
+    private fun dnsHost(e: String): String = when {
+        e.startsWith("[") -> e.substringAfter("[").substringBefore("]")
+        e.count { it == ':' } == 1 -> e.substringBefore(":")
+        else -> e
+    }
+
     /** Resolves [host] with the system resolver (IPv4 first, the tunnel carries IPv4 only). */
     private fun lookup(host: String): String {
         val all = try {
@@ -275,6 +398,7 @@ class V2TunVpnService : VpnService() {
         session++
         ticker.removeCallbacks(tick)
         ticker.removeCallbacks(healthTick)
+        unwatchNetwork()
         runCatching { if (mode == "socks") Mobile.stop() else Mobile.stopTun() }
         closeInterface()
     }
@@ -300,6 +424,7 @@ class V2TunVpnService : VpnService() {
     override fun onDestroy() {
         ticker.removeCallbacks(tick)
         ticker.removeCallbacks(healthTick)
+        unwatchNetwork()
         if (running) {
             running = false
             runCatching { if (mode == "socks") Mobile.stop() else Mobile.stopTun() }
@@ -351,5 +476,8 @@ class V2TunVpnService : VpnService() {
         private const val CHANNEL = "tunnel"
         private const val HEALTH_MS = 30_000L
         private const val MAX_BAD = 2
+        private const val MAX_RECONNECTS = 6
+        private const val RECONNECT_BASE_MS = 3_000L
+        private const val RECONNECT_MAX_MS = 60_000L
     }
 }

@@ -15,6 +15,7 @@ import io.surprise.mobile.Mobile
 import io.surprise.mobile.Protector
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.Inet4Address
 import java.net.InetAddress
 import java.util.concurrent.Executors
 
@@ -99,7 +100,10 @@ class V2TunVpnService : VpnService() {
                 Mobile.setProtector(object : Protector {
                     override fun protect(fd: Long): Boolean = this@V2TunVpnService.protect(fd.toInt())
                 })
-                // The server name has to be resolved before the VPN exists.
+                // Every host name the tunnel has to dial (server, remote proxy, backups) is resolved
+                // here, with the system resolver, before the VPN exists. Resolving them later, inside
+                // the tunnel library, goes to a public DNS server that is often unreachable on the
+                // networks these configs are made for, and the dial then times out on the lookup.
                 val cfg = resolveServer(configIn)
                 val dns = o.optString("dns", "1.1.1.1:53")
                 val dnsIp = dns.substringBeforeLast(":")
@@ -196,21 +200,67 @@ class V2TunVpnService : VpnService() {
     }
 
     /**
-     * Replace a host name in "server" by its IP, keeping the name for SNI, WebSocket Host and the
-     * payload's [host] when they are unset.
+     * Replace every host name the tunnel dials by its IP: the server, the payload's remote proxy,
+     * the XHTTP download server, and the same for each backup. Names that the config leaves unset
+     * (SNI, WebSocket Host, payload [host]) keep the original server name.
      */
     private fun resolveServer(cfg: String): String {
         val j = JSONObject(cfg)
-        val host = j.optString("server")
-        if (host.isEmpty() || host.contains(':') || host.matches(Regex("""\d+\.\d+\.\d+\.\d+"""))) return cfg
-        val ip = InetAddress.getByName(host).hostAddress ?: return cfg
-        j.optJSONObject("tls")?.let { if (it.optString("sni").isEmpty()) it.put("sni", host) }
-        j.optJSONObject("ws")?.let { if (it.optString("host").isEmpty()) it.put("host", host) }
-        // Without this the payload's [host] (empty means the server) would turn into the IP.
-        j.optJSONObject("payload")?.let { if (it.optString("host").isEmpty()) it.put("host", host) }
-        j.put("server", ip)
-        Hub.log("I", "Resolved $host to $ip")
+        resolveOutbound(j)
+        j.optJSONArray("backups")?.let { arr ->
+            for (i in 0 until arr.length()) arr.optJSONObject(i)?.let { resolveOutbound(it) }
+        }
         return j.toString()
+    }
+
+    private fun resolveOutbound(j: JSONObject) {
+        val host = j.optString("server")
+        if (host.isNotEmpty() && !isIpLiteral(host)) {
+            val ip = lookup(host)
+            j.optJSONObject("tls")?.let { if (it.optString("sni").isEmpty()) it.put("sni", host) }
+            j.optJSONObject("ws")?.let { if (it.optString("host").isEmpty()) it.put("host", host) }
+            // Without this the payload's [host] (empty means the server) would turn into the IP.
+            j.optJSONObject("payload")?.let { if (it.optString("host").isEmpty()) it.put("host", host) }
+            j.put("server", ip)
+        }
+        // HTTP-Injector style remote proxy: the TCP connection goes to this host:port, so its name
+        // must be resolved here too. This is the lookup that used to time out inside the tunnel.
+        j.optJSONObject("payload")?.let { p ->
+            val proxy = p.optString("proxy")
+            if (proxy.isNotEmpty()) p.put("proxy", resolveHostPort(proxy))
+        }
+        j.optJSONObject("xhttp")?.optJSONObject("download")?.let { d ->
+            val s = d.optString("server")
+            if (s.isNotEmpty() && !isIpLiteral(s)) {
+                d.optJSONObject("tls")?.let { if (it.optString("sni").isEmpty()) it.put("sni", s) }
+                if (d.optString("host").isEmpty()) d.put("host", s)
+                d.put("server", lookup(s))
+            }
+        }
+    }
+
+    private fun isIpLiteral(h: String) = h.contains(':') || h.matches(Regex("""\d+\.\d+\.\d+\.\d+"""))
+
+    /** Resolves [host] with the system resolver (IPv4 first, the tunnel carries IPv4 only). */
+    private fun lookup(host: String): String {
+        val all = try {
+            InetAddress.getAllByName(host)
+        } catch (e: Exception) {
+            throw IllegalStateException("Could not resolve $host: ${e.message ?: "unknown host"}")
+        }
+        val ip = (all.firstOrNull { it is Inet4Address } ?: all.first()).hostAddress
+            ?: throw IllegalStateException("Could not resolve $host")
+        Hub.log("I", "Resolved $host to $ip")
+        return ip
+    }
+
+    /** "name:port" becomes "ip:port"; an IP, an IPv6 literal or a value without a port is kept. */
+    private fun resolveHostPort(hp: String): String {
+        val i = hp.lastIndexOf(':')
+        if (i <= 0 || hp.startsWith("[")) return hp
+        val h = hp.substring(0, i)
+        if (isIpLiteral(h)) return hp
+        return "${lookup(h)}:${hp.substring(i + 1)}"
     }
 
     /** Closes the VPN interface. This is what removes the key icon; call it after the tunnel library has stopped. */

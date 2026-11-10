@@ -6,6 +6,7 @@ import '../core/bridge.dart';
 import '../core/models.dart';
 import '../core/store.dart';
 import 'dashboard_screen.dart' show fmtBytes;
+import 'diagnose_screen.dart';
 import 'theme.dart';
 
 class ToolsScreen extends StatelessWidget {
@@ -17,6 +18,7 @@ class ToolsScreen extends StatelessWidget {
     final p = st.selected;
     void open(Widget w) => Navigator.of(context).push(MaterialPageRoute(builder: (_) => w));
     final tiles = <(IconData, String, String, VoidCallback)>[
+      (Icons.troubleshoot_rounded, 'Connection test', 'Test each layer of the selected config and see what the server answers', () => open(DiagnosePage(profile: p))),
       (Icons.speed_rounded, 'Speed test', 'Download speed through the selected config', () => open(_Page('Speed test', _SpeedTool(p)))),
       (Icons.radar_rounded, 'Host scanner', 'Find bug hosts a network lets through', () => open(_Page('Host scanner', _ScanTool(p)))),
       (Icons.code_rounded, 'Payload lab', 'Preview and validate payload templates', () => open(_Page('Payload lab', _PayloadTool(p)))),

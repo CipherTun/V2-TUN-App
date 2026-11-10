@@ -95,6 +95,7 @@ class MainActivity : FlutterActivity() {
             "validate" -> background(result) { Mobile.validate(s("config")) }
             "ping" -> background(result) { Mobile.ping(s("config"), s("url")) }
             "speedTest" -> background(result) { Mobile.speedTest(s("config"), "", n("seconds")) }
+            "diagnose" -> background(result) { Mobile.diagnoseConfig(s("config"), n("seconds")) }
             "scanHosts" -> background(result) {
                 Mobile.scanHosts(s("config"), s("field"), s("values"), s("target"), n("jobs"), n("seconds"))
             }

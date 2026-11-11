@@ -333,8 +333,21 @@ class V2TunVpnService : VpnService() {
         val host = j.optString("server")
         if (host.isNotEmpty() && !isIpLiteral(host)) {
             val ip = lookup(host)
-            j.optJSONObject("tls")?.let { if (it.optString("sni").isEmpty()) it.put("sni", host) }
-            j.optJSONObject("ws")?.let { if (it.optString("host").isEmpty()) it.put("host", host) }
+            val proto = j.optString("protocol").lowercase()
+            val net = j.optString("network").lowercase()
+            val hysteria = proto == "hysteria" || proto == "hysteria1" || proto == "hy" || proto == "hysteria2" || proto == "hy2"
+            // The editor drops empty objects, so "tls" and "ws" may not exist even though the name is
+            // needed: REALITY, QUIC and Hysteria take their TLS name from tls.sni, and the HTTP based
+            // transports take the Host / authority from ws.host. Without them the library would
+            // fall back to the address it dials, which is now the IP.
+            val needsTlsName = j.has("reality") || net == "quic" || hysteria
+            val tls = j.optJSONObject("tls") ?: if (needsTlsName) JSONObject().also { j.put("tls", it) } else null
+            tls?.let { if (it.optString("sni").isEmpty()) it.put("sni", host) }
+            val httpTransport = net in HTTP_TRANSPORTS
+            val ws = j.optJSONObject("ws") ?: if (httpTransport) JSONObject().also { j.put("ws", it) } else null
+            // A Host entry in ws.headers is honored by the library when ws.host is empty, so it must
+            // not be overridden here.
+            ws?.let { if (it.optString("host").isEmpty() && !hasHostHeader(it.optJSONObject("headers"))) it.put("host", host) }
             // Without this the payload's [host] (empty means the server) would turn into the IP.
             j.optJSONObject("payload")?.let { if (it.optString("host").isEmpty()) it.put("host", host) }
             j.put("server", ip)
@@ -348,11 +361,22 @@ class V2TunVpnService : VpnService() {
         j.optJSONObject("xhttp")?.optJSONObject("download")?.let { d ->
             val s = d.optString("server")
             if (s.isNotEmpty() && !isIpLiteral(s)) {
-                d.optJSONObject("tls")?.let { if (it.optString("sni").isEmpty()) it.put("sni", s) }
-                if (d.optString("host").isEmpty()) d.put("host", s)
+                val dtls = d.optJSONObject("tls") ?: if (d.has("reality")) JSONObject().also { d.put("tls", it) } else null
+                dtls?.let { if (it.optString("sni").isEmpty()) it.put("sni", s) }
+                if (d.optString("host").isEmpty() && !hasHostHeader(d.optJSONObject("headers"))) d.put("host", s)
                 d.put("server", lookup(s))
             }
         }
+    }
+
+    private fun hasHostHeader(h: JSONObject?): Boolean {
+        if (h == null) return false
+        val keys = h.keys()
+        while (keys.hasNext()) {
+            val k = keys.next()
+            if (k.equals("host", ignoreCase = true) && h.optString(k).isNotEmpty()) return true
+        }
+        return false
     }
 
     private fun isIpLiteral(h: String) = h.contains(':') || h.matches(Regex("""\d+\.\d+\.\d+\.\d+"""))
@@ -479,5 +503,7 @@ class V2TunVpnService : VpnService() {
         private const val MAX_RECONNECTS = 6
         private const val RECONNECT_BASE_MS = 3_000L
         private const val RECONNECT_MAX_MS = 60_000L
+        // Transports whose Host / authority comes from ws.host (names as the library accepts them).
+        private val HTTP_TRANSPORTS = setOf("ws", "websocket", "httpupgrade", "h2", "http", "grpc", "xhttp", "splithttp")
     }
 }

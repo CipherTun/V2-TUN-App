@@ -131,12 +131,13 @@ String _mask(String v) => v.isEmpty ? '' : '\u2022' * (v.length > 12 ? 12 : v.le
 bool _isHysteria(String p) => p == 'hysteria' || p == 'hysteria2';
 
 /// Protocols that take a transport (WebSocket, HTTP/2, gRPC, XHTTP, QUIC, mKCP).
-/// SSH has no transport settings: the library detects by itself whether a
-/// payload with "Upgrade: websocket" leads to a plain or a framed stream, so
-/// the editor shows no network type, host or path for it. SOCKS and the HTTP
+/// SSH takes one as well: the library builds proxy, payload, WebSocket and SSH
+/// in that order for "SSH over WebSocket" with network "ws", and for a plain
+/// tcp stream it also detects by itself whether a payload with
+/// "Upgrade: websocket" leads to a plain or a framed stream. SOCKS and the HTTP
 /// proxies run over a plain connection, optionally with TLS and a payload, and
 /// Hysteria has its own QUIC.
-bool _hasTransport(String p) => p == 'vless' || p == 'vmess' || p == 'trojan' || p == 'shadowsocks';
+bool _hasTransport(String p) => p == 'vless' || p == 'vmess' || p == 'trojan' || p == 'shadowsocks' || p == 'ssh';
 
 /// Top-level keys that belong to particular protocols.
 const _protocolKeys = <String>[
@@ -341,15 +342,6 @@ class _ConfigEditorScreenState extends State<ConfigEditorScreen> {
     super.initState();
     _name = widget.profile?.name ?? '';
     _m = _initial();
-    // SSH has no transport settings (the library detects WebSocket framing from
-    // the payload), so a WebSocket or HTTP Upgrade transport saved earlier is
-    // removed when the config is opened. Saving writes the cleaned config.
-    if (_canonProtocol(_str('protocol')) == 'ssh' && _transportKeys.any((k) => !_empty(_m[k]))) {
-      for (final k in _transportKeys) {
-        _m.remove(k);
-      }
-      _dirty = true;
-    }
   }
 
   Map<String, dynamic> _initial() {

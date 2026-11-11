@@ -486,7 +486,19 @@ class AppStore extends ChangeNotifier {
       for (final o in others) {
         try {
           final b = jsonDecode(o.json) as Map<String, dynamic>;
-          for (final k in ['routing', 'udpgw', 'directDns', 'backups']) {
+          // The library refuses a backup that carries settings of the top-level config:
+          // routing, udpgw, directDns, balance and nested backups. The timing keys are
+          // ignored there, so they are dropped as well.
+          for (final k in [
+            'routing',
+            'udpgw',
+            'directDns',
+            'backups',
+            'balance',
+            'latencySortSec',
+            'idleTimeoutSec',
+            'failoverTimeoutSec',
+          ]) {
             b.remove(k);
           }
           list.add(b);

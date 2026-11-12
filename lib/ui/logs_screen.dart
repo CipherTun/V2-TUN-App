@@ -39,14 +39,22 @@ class _LogsScreenState extends State<LogsScreen> {
           IconButton(tooltip: 'Clear', onPressed: st.clearLogs, icon: const Icon(Icons.delete_sweep_rounded)),
         ]),
       ),
+      SwitchListTile(
+        dense: true,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 20),
+        title: const Text('Detailed logging'),
+        subtitle: const Text('Adds every connection, DNS detail and the failover ranking'),
+        value: st.logLevel == 'debug',
+        onChanged: (v) => st.setLogLevel(v ? 'debug' : 'info'),
+      ),
       SizedBox(
         height: 48,
         child: ListView(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 20), children: [
-          for (final f in const ['ALL', 'I', 'W', 'E'])
+          for (final f in const ['ALL', 'D', 'I', 'W', 'E'])
             Padding(
               padding: const EdgeInsets.only(right: 8),
               child: ChoiceChip(
-                label: Text(switch (f) { 'I' => 'Info', 'W' => 'Warn', 'E' => 'Error', _ => 'All' }),
+                label: Text(switch (f) { 'D' => 'Debug', 'I' => 'Info', 'W' => 'Warn', 'E' => 'Error', _ => 'All' }),
                 selected: _level == f,
                 onSelected: (_) => setState(() => _level = f),
               ),

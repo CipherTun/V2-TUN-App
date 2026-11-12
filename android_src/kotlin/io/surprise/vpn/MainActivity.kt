@@ -109,6 +109,8 @@ class MainActivity : FlutterActivity() {
             "setRouteList" -> background(result) { Mobile.setRouteList(s("name"), s("items")); null }
             "activeOutbound" -> background(result) { Mobile.activeOutbound().toInt() }
             "resetTraffic" -> background(result) { Mobile.resetTraffic(); null }
+            // "info" (default) or "debug": debug adds every connection, DNS detail and the failover ranking.
+            "setLogLevel" -> background(result) { Mobile.setLogLevel(s("level")); null }
             else -> result.notImplemented()
         }
     }

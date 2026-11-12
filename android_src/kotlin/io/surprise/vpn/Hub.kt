@@ -43,6 +43,7 @@ object Hub {
             val level = when (j.optString("level")) {
                 "error" -> "E"
                 "warn" -> "W"
+                "debug" -> "D"
                 else -> "I"
             }
             val text = StringBuilder()

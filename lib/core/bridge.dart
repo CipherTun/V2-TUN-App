@@ -44,6 +44,8 @@ class Bridge {
       _m.invokeMethod('setRouteList', {'name': name, 'items': items});
   static Future<int> activeOutbound() async => (await _m.invokeMethod<int>('activeOutbound')) ?? -1;
   static Future<void> resetTraffic() => _m.invokeMethod('resetTraffic');
+  /// How much the tunnel library logs: 'info' (default) or 'debug'.
+  static Future<void> setLogLevel(String level) => _m.invokeMethod('setLogLevel', {'level': level});
   static Future<List<Map<dynamic, dynamic>>> installedApps() async =>
       ((await _m.invokeMethod<List<dynamic>>('installedApps')) ?? []).cast<Map<dynamic, dynamic>>();
   static Future<void> openVpnSettings() => _m.invokeMethod('openVpnSettings');

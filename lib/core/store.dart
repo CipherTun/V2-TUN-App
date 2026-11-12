@@ -22,6 +22,9 @@ class AppStore extends ChangeNotifier {
   ConnState state = ConnState.disconnected;
   String? error;
   final List<LogLine> logs = [];
+  /// How much the tunnel library logs: 'info' (default) or 'debug' (every connection, DNS detail,
+  /// the failover ranking). Kept apart from [settings] and applied to the library at once.
+  String logLevel = 'info';
   int upBytes = 0, downBytes = 0;
   double upBps = 0, downBps = 0;
   /// The last 48 download rates, one per second, for the dashboard chart.
@@ -54,6 +57,8 @@ class AppStore extends ChangeNotifier {
     st.lifetimeBytes = p.getInt('lifetime') ?? 0;
     st._day = p.getString('usageDay') ?? '';
     st.todayBytes = st._day == st._today() ? (p.getInt('usageToday') ?? 0) : 0;
+    st.logLevel = p.getString('logLevel') == 'debug' ? 'debug' : 'info';
+    if (st.logLevel == 'debug') unawaited(Bridge.setLogLevel('debug').catchError((Object _) {}));
     // Moves anything an older version left in plain text into the encrypted store.
     st.saveSettings();
     st._saveSubs();
@@ -452,6 +457,14 @@ class AppStore extends ChangeNotifier {
 
   void clearLogs() {
     logs.clear();
+    notifyListeners();
+  }
+
+  /// Sets how much the tunnel library logs ('info' or 'debug') and remembers it.
+  void setLogLevel(String level) {
+    logLevel = level == 'debug' ? 'debug' : 'info';
+    _prefs.setString('logLevel', logLevel);
+    unawaited(Bridge.setLogLevel(logLevel).catchError((Object _) {}));
     notifyListeners();
   }
 
